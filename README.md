@@ -1,6 +1,6 @@
-# PathFinder360
+# Datalink Rover
 
-PathFinder360 represents a sophisticated advancement in autonomous tracked vehicle design, integrating cutting-edge hardware and software solutions. This project is engineered for versatility, encompassing capabilities such as autonomous navigation, manual control, and precision docking. Its modular architecture is designed to support advanced telemetry, real-time video streaming, and future enhancements, including the integration of a robotic arm.
+Datalink Rover represents a sophisticated advancement in autonomous tracked vehicle design, integrating cutting-edge hardware and software solutions. This project is engineered for versatility, encompassing capabilities such as autonomous navigation, manual control, and precision docking. Its modular architecture is designed to support advanced telemetry, real-time video streaming, and future enhancements, including the integration of a robotic arm.
 
 ## Key Features
 - **Tracked Mobility**: Implements durable plastic tracks with adjustable, tank-style suspension to optimize traction and stability across diverse terrains.
@@ -46,7 +46,7 @@ PathFinder360 represents a sophisticated advancement in autonomous tracked vehic
 ## Initial Setup
 1. Clone this repository:
    ```bash
-   git clone https://github.com/your-username/PathFinder360.git
+   git clone https://github.com/your-username/Datalink-Rover.git
    ```
 2. Install dependencies:
    - For Python: Install required libraries listed in `requirements.txt`.
