@@ -1,74 +1,127 @@
 import customtkinter as ctk
-from ui.colors import temp_color, storage_color
+from ui.colors import temp_color  # we reuse your existing color logic if needed
 
 
-class TempBar(ctk.CTkFrame):
+class _SmoothBar(ctk.CTkFrame):
     """
-    Premium temperature bar.
-    Uses a CTkProgressBar + label + dynamic colors.
-    """
-
-    def __init__(self, parent, model: str):
-        super().__init__(parent, corner_radius=12)
-        self.model = model
-        self.scale = 1.0
-
-        self.progress = ctk.CTkProgressBar(self, width=260, height=18)
-        self.progress.pack(padx=10, pady=(8, 4))
-        self.progress.set(0)
-
-        self.label = ctk.CTkLabel(self, text="Temp: -- °C", font=("Segoe UI", 13))
-        self.label.pack(pady=(0, 6))
-
-    def update_temp(self, temp: int):
-        self.label.configure(text=f"Temp: {temp} °C")
-        color = temp_color(self.model, temp)
-        self.progress.configure(progress_color=color)
-        self.progress.set(min(temp / 100, 1))
-
-    def set_scale(self, scale: float):
-        self.scale = scale
-        width = max(180, int(260 * scale))
-        height = max(12, int(18 * scale))
-        self.progress.configure(width=width, height=height)
-        self.label.configure(font=("Segoe UI", max(10, int(13 * scale))))
-
-
-class StorageBar(ctk.CTkFrame):
-    """
-    Storage "used" bar with text.
-    Shows used/total and percentage, color-coded.
+    Base class: smooth animated bar from 0..100%.
+    Subclasses should implement:
+      - _apply_color(percent)
+      - _format_label_value(percent)  -> string
     """
 
-    def __init__(self, parent):
-        super().__init__(parent, corner_radius=12)
-        self.scale = 1.0
+    def __init__(self, master, label: str, **kwargs):
+        super().__init__(master, **kwargs)
 
-        self.progress = ctk.CTkProgressBar(self, width=260, height=18)
-        self.progress.pack(padx=10, pady=(8, 4))
-        self.progress.set(0)
+        self.current_value = 0.0
+        self.target_value = 0.0
+        self.animating = False
 
-        self.label = ctk.CTkLabel(self, text="Storage: --", font=("Segoe UI", 13))
-        self.label.pack(pady=(0, 6))
+        self.label_widget = ctk.CTkLabel(
+            self,
+            text=label,
+            font=("Segoe UI", 11),
+        )
+        self.label_widget.grid(row=0, column=0, sticky="w")
 
-    def update_storage(self, used_gb: int, total_gb: int):
-        if total_gb <= 0:
-            self.progress.set(0)
-            self.label.configure(text="Storage: N/A")
+        self.value_label = ctk.CTkLabel(
+            self,
+            text="--",
+            font=("Segoe UI", 11),
+        )
+        self.value_label.grid(row=0, column=1, padx=(8, 0))
+
+        self.bar = ctk.CTkProgressBar(
+            self,
+            height=12,
+        )
+        self.bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        self.columnconfigure(0, weight=1)
+        self.bar.set(0.0)
+
+    # ---------- animation ----------
+    def _apply_color(self, percent: float):
+        pass
+
+    def _format_label_value(self, percent: float) -> str:
+        return f"{percent:.0f}%"
+
+    def _update_visuals(self, percent: float):
+        self.bar.set(percent / 100.0)
+        self._apply_color(percent)
+        self.value_label.configure(text=self._format_label_value(percent))
+
+    def _animate_step(self):
+        diff = self.target_value - self.current_value
+        if abs(diff) < 0.5:
+            self.current_value = self.target_value
+            self._update_visuals(self.current_value)
+            self.animating = False
             return
 
-        percent = int((used_gb / total_gb) * 100)
-        color = storage_color(percent)
-        self.progress.configure(progress_color=color)
-        self.progress.set(percent / 100)
+        self.current_value += diff * 0.3
+        self._update_visuals(self.current_value)
+        self.after(30, self._animate_step)
 
-        self.label.configure(
-            text=f"Storage: {used_gb} / {total_gb} GB ({percent}%)"
-        )
+    def _set_target(self, percent: float):
+        self.target_value = max(0.0, min(100.0, float(percent)))
+        if not self.animating:
+            self.animating = True
+            self._animate_step()
 
-    def set_scale(self, scale: float):
-        self.scale = scale
-        width = max(180, int(260 * scale))
-        height = max(12, int(18 * scale))
-        self.progress.configure(width=width, height=height)
-        self.label.configure(font=("Segoe UI", max(10, int(13 * scale))))
+
+class TempBar(_SmoothBar):
+    """
+    Temperature bar.
+    API expected by PiCard:
+      - __init__(..., model="pi5"|"zero2w")
+      - update_temp(temp_c: int)
+    """
+
+    def __init__(self, master, model: str, **kwargs):
+        super().__init__(master, label="Temp", **kwargs)
+        self.model = model
+
+    def _apply_color(self, percent: float):
+        # We assume percent ~= temp C (0..100). Use your existing temp_color.
+        color = temp_color(self.model, percent)
+        self.bar.configure(progress_color=color)
+
+    def _format_label_value(self, percent: float) -> str:
+        return f"{percent:.0f} °C"
+
+    # public API used by PiCard
+    def update_temp(self, temp_c: float):
+        # we treat 0..100°C as 0..100%
+        self._set_target(temp_c)
+
+
+class StorageBar(_SmoothBar):
+    """
+    Storage bar.
+    API expected by PiCard:
+      - update_storage(used_gb: int, total_gb: int)
+    """
+
+    def __init__(self, master, **kwargs):
+        super().__init__(master, label="Storage", **kwargs)
+        self.used = 0
+        self.total = 1
+
+    def _apply_color(self, percent: float):
+        if percent < 70:
+            color = "#00c853"
+        elif percent < 90:
+            color = "#ffd600"
+        else:
+            color = "#ff3d00"
+        self.bar.configure(progress_color=color)
+
+    def _format_label_value(self, percent: float) -> str:
+        return f"{percent:.0f}%"
+
+    def update_storage(self, used_gb: float, total_gb: float):
+        self.used = used_gb
+        self.total = max(total_gb, 0.1)
+        percent = (self.used / self.total) * 100.0
+        self._set_target(percent)

@@ -1,12 +1,23 @@
-# Python
+# Python bytecode / cache
 __pycache__/
-*.pyc
-.venv/
-venv/
+*.py[cod]
+*.pyo
+*.pyd
 
-# VSCode
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+apps/pi-monitor/venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
+
+# VS Code config (optional)
 .vscode/
 
-# OS junk
-.DS_Store
-Thumbs.db
+# Other
+*.log
