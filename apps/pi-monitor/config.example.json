@@ -1,0 +1,7 @@
+{
+  "ssh_user": "radu",
+  "ssh_password": "YOUR_REAL_PI_PASSWORD_HERE",
+  "rpiremote_host": "10.0.0.1",
+  "rpidock_host": "10.0.1.5",
+  "rpicar_host": "10.0.1.3"
+}

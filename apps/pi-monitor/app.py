@@ -1,9 +1,74 @@
-import random
 import customtkinter as ctk
+import paramiko
+import threading
+import re
+import time
 
 # ------------------- THEME SETTINGS -------------------
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
+
+
+# ------------------- SSH DATA FUNCTION -------------------
+def get_pi_stats_via_ssh(host, user="radu", password="raduboss2004", timeout=3):
+    stats = {
+        "online": False,
+        "cpu": 0,
+        "ram": 0,
+        "temp": 0,
+        "storage": 0,
+        "uptime": "N/A"
+    }
+
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(host, username=user, password=password, timeout=timeout)
+
+        stats["online"] = True
+
+        # --- TEMP ---
+        stdin, stdout, _ = client.exec_command("vcgencmd measure_temp")
+        out = stdout.read().decode().strip()
+        m = re.search(r"temp=([0-9.]+)", out)
+        if m:
+            stats["temp"] = float(m.group(1))
+
+        # --- CPU LOAD ---
+        stdin, stdout, _ = client.exec_command("top -bn1 | grep load")
+        load_str = stdout.read().decode().strip()
+        m = re.search(r"load average: ([0-9.]+)", load_str)
+        if m:
+            stats["cpu"] = int(float(m.group(1)) * 25)  # approx → convert load to %
+
+        # --- RAM ---
+        stdin, stdout, _ = client.exec_command("free -m")
+        lines = stdout.read().decode().splitlines()
+        if len(lines) >= 2:
+            parts = lines[1].split()
+            total_ram = int(parts[1])
+            used_ram = int(parts[2])
+            stats["ram"] = int((used_ram / total_ram) * 100)
+
+        # --- STORAGE ---
+        stdin, stdout, _ = client.exec_command("df -h / | tail -1")
+        parts = stdout.read().decode().split()
+        if len(parts) >= 5:
+            used = parts[2]
+            total = parts[1]
+            percent = parts[4].replace("%", "")
+            stats["storage"] = int(percent)
+
+        # --- UPTIME ---
+        stdin, stdout, _ = client.exec_command("uptime -p")
+        stats["uptime"] = stdout.read().decode().strip()
+
+        client.close()
+
+    except:
+        pass
+
+    return stats
 
 
 # ------------------- PiCard WIDGET --------------------
@@ -57,23 +122,21 @@ class PiCard(ctk.CTkFrame):
         self.label_uptime = ctk.CTkLabel(self, text="Uptime: --")
         self.label_uptime.grid(row=7, column=0, sticky="w", padx=10, pady=(2, 10))
 
-        # Let card stretch nicely
         self.grid_rowconfigure(8, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-    # ------ FUNCTION TO UPDATE ONE CARD ------
-    def update_status(self, online: bool, cpu: int, ram: int, temp: int, storage: int, uptime: str):
-
-        if online:
+    # Update card
+    def update_status(self, stats):
+        if stats["online"]:
             self.label_online.configure(text="Status: ONLINE", text_color="green")
         else:
             self.label_online.configure(text="Status: OFFLINE", text_color="red")
 
-        self.label_cpu.configure(text=f"CPU: {cpu} %")
-        self.label_ram.configure(text=f"RAM: {ram} %")
-        self.label_temp.configure(text=f"Temp: {temp} °C")
-        self.label_storage.configure(text=f"Storage: {storage} %")
-        self.label_uptime.configure(text=f"Uptime: {uptime}")
+        self.label_cpu.configure(text=f"CPU: {stats['cpu']} %")
+        self.label_ram.configure(text=f"RAM: {stats['ram']} %")
+        self.label_temp.configure(text=f"Temp: {stats['temp']} °C")
+        self.label_storage.configure(text=f"Storage: {stats['storage']} %")
+        self.label_uptime.configure(text=f"Uptime: {stats['uptime']}")
 
 
 # ------------------- MAIN APP WINDOW --------------------
@@ -81,7 +144,6 @@ class PiMonitorApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        # Window
         self.title("DataLink Rover – Pi Monitor")
         self.geometry("1000x600")
         self.minsize(900, 500)
@@ -108,13 +170,12 @@ class PiMonitorApp(ctk.CTk):
         self.main_area = ctk.CTkFrame(self)
         self.main_area.pack(fill="both", expand=True, padx=20, pady=20)
 
-        # 1 row, 3 columns
         self.main_area.grid_rowconfigure(0, weight=1)
         self.main_area.grid_columnconfigure(0, weight=1)
         self.main_area.grid_columnconfigure(1, weight=1)
         self.main_area.grid_columnconfigure(2, weight=1)
 
-        # Three Pi cards
+        # Pi cards
         self.card_remote = PiCard(self.main_area, "rpiremote", "Remote / Controller")
         self.card_remote.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
@@ -124,42 +185,37 @@ class PiMonitorApp(ctk.CTk):
         self.card_dock = PiCard(self.main_area, "rpidock", "Docking Station")
         self.card_dock.grid(row=0, column=2, sticky="nsew", padx=10, pady=10)
 
-        # Fake uptime counter
-        self.ticks = 0
-
-        # Start update loop (every 1 sec)
-        self.after(1000, self.update_loop)
+        # Start threaded update loop
+        self.after(1000, self.threaded_update)
 
     def on_config(self):
-        # Will become your slide-out animation menu later
         print("Rover Network button clicked")
 
-    # ------------------- AUTO-REFRESH LOOP -------------------
+    # ------------------- THREADED REFRESH -------------------
+    def threaded_update(self):
+        threading.Thread(target=self.update_loop, daemon=True).start()
+        self.after(2000, self.threaded_update)  # refresh every 2 sec
+
+    # ------------------- UPDATE LOOP -------------------
     def update_loop(self):
 
-        self.ticks += 1
-        uptime_str = f"{self.ticks} s"
+        # Real stats:
+        rpiremote_stats = get_pi_stats_via_ssh("10.0.0.1")
+        rpidock_stats   = get_pi_stats_via_ssh("10.0.1.5")
 
-        def fake_stats():
-            cpu = random.randint(1, 100)
-            ram = random.randint(1, 100)
-            temp = random.randint(35, 80)
-            storage = random.randint(10, 90)
-            online = random.choice([True, True, True, False])
-            return online, cpu, ram, temp, storage
+        # Car stats (not implemented yet → offline)
+        rpicar_stats = {
+            "online": False,
+            "cpu": 0,
+            "ram": 0,
+            "temp": 0,
+            "storage": 0,
+            "uptime": "N/A"
+        }
 
-        # Update each card
-        r_on, r_cpu, r_ram, r_temp, r_storage = fake_stats()
-        self.card_remote.update_status(r_on, r_cpu, r_ram, r_temp, r_storage, uptime_str)
-
-        c_on, c_cpu, c_ram, c_temp, c_storage = fake_stats()
-        self.card_car.update_status(c_on, c_cpu, c_ram, c_temp, c_storage, uptime_str)
-
-        d_on, d_cpu, d_ram, d_temp, d_storage = fake_stats()
-        self.card_dock.update_status(d_on, d_cpu, d_ram, d_temp, d_storage, uptime_str)
-
-        # Call this method again in 1 second
-        self.after(1000, self.update_loop)
+        self.card_remote.update_status(rpiremote_stats)
+        self.card_dock.update_status(rpidock_stats)
+        self.card_car.update_status(rpicar_stats)
 
 
 # ------------------- RUN APP -------------------

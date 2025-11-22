@@ -1,8 +1,8 @@
 import customtkinter as ctk
 from ui.dials import Dial
-from ui.bars import TempBar, StorageBar
+from ui.bars import TempBar, StorageBar, RamBar, ClockBar
 from ui.leds import StatusLED
-from ui.colors import voltage_color, temp_color, cpu_color, gpu_color
+from ui.colors import voltage_color, temp_color, cpu_color
 
 
 class PiCard(ctk.CTkFrame):
@@ -10,11 +10,12 @@ class PiCard(ctk.CTkFrame):
     Main widget representing one Raspberry Pi.
     Contains:
       - header (name, role, status LED)
-      - CPU & GPU dials (always visible)
-      - temperature bar
-      - storage bar
-      - voltage label
-      - uptime label
+      - CPU dial
+      - right column: Temp + GPU clock bars (in place of old GPU dial)
+      - RAM bar
+      - Storage bar
+      - Voltage label
+      - Uptime label
     """
 
     def __init__(self, parent, name: str, role: str, model: str):
@@ -44,26 +45,32 @@ class PiCard(ctk.CTkFrame):
         self.status_led.pack(side="right", padx=(0, 4))
         self.status_led.animate()
 
-        # -------- DIAL ROW (CPU + GPU) --------
+        # -------- TOP ROW: CPU DIAL + TEMP/CLOCK BOX --------
         dial_row = ctk.CTkFrame(self, fg_color="transparent")
-        dial_row.pack(pady=(4, 0))
+        dial_row.pack(fill="x", padx=6, pady=(4, 2))
 
         self.cpu_dial = Dial(dial_row, "CPU")
         self.cpu_dial.pack(side="left", padx=6, pady=4)
 
-        self.gpu_dial = Dial(dial_row, "GPU")
-        self.gpu_dial.pack(side="left", padx=6, pady=4)
+        right_box = ctk.CTkFrame(dial_row, fg_color="transparent")
+        right_box.pack(side="left", fill="both", expand=True, padx=6, pady=4)
 
-        # -------- TEMP + STORAGE --------
-        self.temp_bar = TempBar(self, model=self.model)
-        self.temp_bar.pack(pady=(6, 2))
+        self.temp_bar = TempBar(right_box, model=self.model)
+        self.temp_bar.pack(fill="x", pady=(0, 4))
+
+        self.clock_bar = ClockBar(right_box, max_mhz=1000.0)
+        self.clock_bar.pack(fill="x", pady=(0, 0))
+
+        # -------- RAM + STORAGE --------
+        self.ram_bar = RamBar(self)
+        self.ram_bar.pack(fill="x", padx=6, pady=(4, 2))
 
         self.storage_bar = StorageBar(self)
-        self.storage_bar.pack(pady=(6, 2))
+        self.storage_bar.pack(fill="x", padx=6, pady=(2, 4))
 
         # -------- VOLTAGE & UPTIME --------
         self.voltage_label = ctk.CTkLabel(self, text="Voltage: -- V")
-        self.voltage_label.pack(pady=(8, 2))
+        self.voltage_label.pack(pady=(6, 2))
 
         self.uptime_label = ctk.CTkLabel(self, text="Uptime: --")
         self.uptime_label.pack(pady=(0, 8))
@@ -71,50 +78,43 @@ class PiCard(ctk.CTkFrame):
     # ---------- UPDATE FROM STATS ----------
     def update_stats(self, stats: dict, uptime: str):
         """
-        Update all visual elements from a stats dict:
-          stats = {
-            "online": bool,
-            "cpu": int,
-            "gpu": int | None,
-            "temp": int,
-            "storage_used": int,
-            "storage_total": int,
-            "voltage": float
-          }
+        stats dict is expected to contain:
+          online         -> bool
+          cpu            -> int 0..100
+          temp           -> float (°C)
+          ram_percent    -> int 0..100
+          storage_used   -> numeric (same unit as total)
+          storage_total  -> numeric
+          voltage        -> float (V)
+          gpu_clock_mhz  -> float (MHz)
         """
+        online = stats.get("online", False)
+        cpu = stats.get("cpu", 0)
+        temp = stats.get("temp", 0.0)
+        ram_percent = stats.get("ram_percent", 0)
+        used = stats.get("storage_used", 0)
+        total = stats.get("storage_total", 32)
+        voltage = stats.get("voltage", 5.0)
+        gpu_clock_mhz = stats.get("gpu_clock_mhz", 0.0)
 
-        online = stats["online"]
-        cpu = stats["cpu"]
-        gpu = stats["gpu"]
-        temp = stats["temp"]
-        used = stats["storage_used"]
-        total = stats["storage_total"]
-        voltage = stats["voltage"]
-
-        # ------ STATUS LED ------
+        # ------ Status LED logic ------
         if not online:
-            self.status_led.set_color("#ff4444", blink=True, fast=False)
+            self.status_led.set_color("#ff4444", blink=True, fast=True)
         else:
-            # If overheated or very high CPU => yellow blinking
             if temp_color(self.model, temp) == "#ff4444" or cpu_color(cpu) == "#ff4444":
                 self.status_led.set_color("#ffdd00", blink=True, fast=False)
             else:
                 self.status_led.set_color("#00ff88", blink=False, fast=False)
 
-        # ------ CPU / GPU DIALS ------
+        # ------ CPU DIAL ------
         self.cpu_dial.set_value(cpu)
 
-        if gpu is None:
-            self.gpu_dial.set_value(0)
-            self.gpu_dial.label.configure(text="GPU (N/A)")
-        else:
-            self.gpu_dial.label.configure(text="GPU")
-            self.gpu_dial.set_value(gpu)
-
-        # ------ Temperature bar ------
+        # ------ Temperature + Clock bars ------
         self.temp_bar.update_temp(temp)
+        self.clock_bar.update_clock(gpu_clock_mhz)
 
-        # ------ Storage bar ------
+        # ------ RAM + Storage ------
+        self.ram_bar.update_ram(ram_percent)
         self.storage_bar.update_storage(used, total)
 
         # ------ Voltage ------
@@ -124,11 +124,6 @@ class PiCard(ctk.CTkFrame):
         # ------ Uptime ------
         self.uptime_label.configure(text=f"Uptime: {uptime}")
 
-    # ---------- SCALING STUB ----------
+    # kept for compatibility, does nothing right now
     def set_scale(self, scale: float):
-        """
-        Stub kept only so existing calls won't crash
-        if we ever reintroduce scaling.
-        Currently does nothing to keep UI stable & fast.
-        """
         return

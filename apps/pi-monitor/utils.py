@@ -19,19 +19,23 @@ def format_uptime(seconds: int) -> str:
     return f"{days}d {hours % 24}h"
 
 
-# ---------- SIMULATED PI STATS FOR DEBUG/UI DEVELOPMENT ----------
+# ---------- FAKE STATS (DEMO / OFFLINE) ----------
 def fake_pi_stats(model: str):
     """
     Generate fake data to test the UI.
-    Later this will be replaced by real HTTP requests
-    to rpiremote, rpicar, and rpidock.
     """
+    if model == "pi5":
+        gpu_clock = random.randint(300, 900)  # MHz
+    else:
+        gpu_clock = 0
+
     return {
         "online": random.choice([True, True, True, False]),  # mostly online
         "cpu": random.randint(1, 100),
-        "gpu": random.randint(1, 100) if model == "pi5" else None,
         "temp": random.randint(40, 85),
+        "ram_percent": random.randint(10, 95),
         "storage_used": random.randint(4, 25),  # GB used
         "storage_total": 32,
-        "voltage": round(random.uniform(4.6, 5.2), 2)
+        "voltage": round(random.uniform(4.6, 5.2), 2),
+        "gpu_clock_mhz": gpu_clock,
     }

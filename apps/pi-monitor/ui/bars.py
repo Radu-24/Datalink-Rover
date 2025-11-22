@@ -1,5 +1,5 @@
 import customtkinter as ctk
-from ui.colors import temp_color  # we reuse your existing color logic if needed
+from ui.colors import temp_color, cpu_color
 
 
 class _SmoothBar(ctk.CTkFrame):
@@ -15,98 +15,85 @@ class _SmoothBar(ctk.CTkFrame):
 
         self.current_value = 0.0
         self.target_value = 0.0
-        self.animating = False
 
-        self.label_widget = ctk.CTkLabel(
-            self,
-            text=label,
-            font=("Segoe UI", 11),
-        )
-        self.label_widget.grid(row=0, column=0, sticky="w")
+        self.label_left = ctk.CTkLabel(self, text=label)
+        self.label_left.pack(anchor="w")
 
-        self.value_label = ctk.CTkLabel(
-            self,
-            text="--",
-            font=("Segoe UI", 11),
-        )
-        self.value_label.grid(row=0, column=1, padx=(8, 0))
-
-        self.bar = ctk.CTkProgressBar(
-            self,
-            height=12,
-        )
-        self.bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
-        self.columnconfigure(0, weight=1)
+        self.bar = ctk.CTkProgressBar(self)
         self.bar.set(0.0)
+        self.bar.pack(fill="x", pady=(2, 0))
 
-    # ---------- animation ----------
+        self.label_right = ctk.CTkLabel(self, text="0")
+        self.label_right.pack(anchor="e", pady=(2, 0))
+
+        self.after(50, self._smooth_step)
+
+    def _smooth_step(self):
+        diff = self.target_value - self.current_value
+        self.current_value += diff * 0.25
+        if abs(diff) < 0.5:
+            self.current_value = self.target_value
+
+        clamped = max(0.0, min(100.0, self.current_value))
+        self._apply_bar_value(clamped)
+
+        self.after(50, self._smooth_step)
+
+    def _apply_bar_value(self, percent: float):
+        """Update progress + label using subclass logic."""
+        # default: 0..100% bar
+        self.bar.set(percent / 100.0)
+        self._apply_color(percent)
+        self.label_right.configure(text=self._format_label_value(percent))
+
+    def _set_target(self, value: float):
+        self.target_value = value
+
+    # to be implemented by subclasses
     def _apply_color(self, percent: float):
-        pass
+        raise NotImplementedError
 
     def _format_label_value(self, percent: float) -> str:
         return f"{percent:.0f}%"
 
-    def _update_visuals(self, percent: float):
-        self.bar.set(percent / 100.0)
-        self._apply_color(percent)
-        self.value_label.configure(text=self._format_label_value(percent))
-
-    def _animate_step(self):
-        diff = self.target_value - self.current_value
-        if abs(diff) < 0.5:
-            self.current_value = self.target_value
-            self._update_visuals(self.current_value)
-            self.animating = False
-            return
-
-        self.current_value += diff * 0.3
-        self._update_visuals(self.current_value)
-        self.after(30, self._animate_step)
-
-    def _set_target(self, percent: float):
-        self.target_value = max(0.0, min(100.0, float(percent)))
-        if not self.animating:
-            self.animating = True
-            self._animate_step()
-
 
 class TempBar(_SmoothBar):
     """
-    Temperature bar.
-    API expected by PiCard:
-      - __init__(..., model="pi5"|"zero2w")
-      - update_temp(temp_c: int)
+    Temperature bar. We pass real °C into update_temp(),
+    and treat that °C value directly on the bar.
     """
 
     def __init__(self, master, model: str, **kwargs):
         super().__init__(master, label="Temp", **kwargs)
         self.model = model
 
-    def _apply_color(self, percent: float):
-        # We assume percent ~= temp C (0..100). Use your existing temp_color.
-        color = temp_color(self.model, percent)
+    def _apply_bar_value(self, temp_c: float):
+        # visual range 0..100°C
+        clamped = max(0.0, min(100.0, temp_c))
+        self.bar.set(clamped / 100.0)
+        self._apply_color(clamped)
+        self.label_right.configure(text=self._format_label_value(clamped))
+
+    def _apply_color(self, temp_c: float):
+        color = temp_color(self.model, temp_c)
         self.bar.configure(progress_color=color)
 
-    def _format_label_value(self, percent: float) -> str:
-        return f"{percent:.0f} °C"
+    def _format_label_value(self, temp_c: float) -> str:
+        return f"{temp_c:.0f} °C"
 
-    # public API used by PiCard
     def update_temp(self, temp_c: float):
-        # we treat 0..100°C as 0..100%
         self._set_target(temp_c)
 
 
 class StorageBar(_SmoothBar):
     """
-    Storage bar.
-    API expected by PiCard:
-      - update_storage(used_gb: int, total_gb: int)
+    Storage bar: shows % used, but we also keep used/total for logic.
     """
 
     def __init__(self, master, **kwargs):
         super().__init__(master, label="Storage", **kwargs)
-        self.used = 0
-        self.total = 1
+        self.used = 0.0
+        self.total = 1.0
 
     def _apply_color(self, percent: float):
         if percent < 70:
@@ -124,4 +111,49 @@ class StorageBar(_SmoothBar):
         self.used = used_gb
         self.total = max(total_gb, 0.1)
         percent = (self.used / self.total) * 100.0
+        self._set_target(percent)
+
+
+class RamBar(_SmoothBar):
+    """
+    RAM usage bar, based on percent used.
+    """
+
+    def __init__(self, master, **kwargs):
+        super().__init__(master, label="RAM", **kwargs)
+
+    def _apply_color(self, percent: float):
+        color = cpu_color(percent)
+        self.bar.configure(progress_color=color)
+
+    def _format_label_value(self, percent: float) -> str:
+        return f"{percent:.0f}%"
+
+    def update_ram(self, percent: float):
+        self._set_target(max(0.0, min(100.0, float(percent))))
+
+
+class ClockBar(_SmoothBar):
+    """
+    GPU clock bar. Internally works with %, but label shows MHz.
+    """
+
+    def __init__(self, master, max_mhz: float = 1000.0, **kwargs):
+        super().__init__(master, label="GPU clk", **kwargs)
+        self.max_mhz = max_mhz
+
+    def _apply_color(self, percent: float):
+        # reuse CPU color thresholds (low/med/high)
+        color = cpu_color(percent)
+        self.bar.configure(progress_color=color)
+
+    def _format_label_value(self, percent: float) -> str:
+        mhz = (percent / 100.0) * self.max_mhz
+        return f"{mhz:.0f} MHz"
+
+    def update_clock(self, mhz: float):
+        if self.max_mhz <= 0:
+            percent = 0.0
+        else:
+            percent = max(0.0, min(100.0, (mhz / self.max_mhz) * 100.0))
         self._set_target(percent)

@@ -21,3 +21,4 @@ dist/
 
 # Other
 *.log
+apps/pi-monitor/config.json
