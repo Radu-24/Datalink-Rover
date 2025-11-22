@@ -1,71 +1,183 @@
-# Datalink Rover
+# DataLink Rover
 
-Datalink Rover represents a sophisticated advancement in autonomous tracked vehicle design, integrating cutting-edge hardware and software solutions. This project is engineered for versatility, encompassing capabilities such as autonomous navigation, manual control, and precision docking. Its modular architecture is designed to support advanced telemetry, real-time video streaming, and future enhancements, including the integration of a robotic arm.
-
-## Key Features
-- **Tracked Mobility**: Implements durable plastic tracks with adjustable, tank-style suspension to optimize traction and stability across diverse terrains.
-- **360° Camera System**: Employs a high-resolution rotating camera mounted on a servo or stepper motor, ensuring seamless and controlled rotational movement.
-- **FPV Camera**: Features a fixed front-facing camera for immersive first-person navigation.
-- **Obstacle Detection and Avoidance**: Utilizes ultrasonic sensors with a broad field of view (120°–160°) to ensure reliable environmental awareness.
-- **Driving Modes**:
-  - *Autonomous Mode*: Enables the vehicle to dynamically follow the remote control while avoiding static and dynamic obstacles.
-  - *Manual Override*: Grants full user control, with real-time safety features enabled.
-  - *Docking Mode*: Automatically aligns and connects to a charging station with precision guidance.
-- **Remote Control Interface**: Includes an F1-inspired wheel design featuring:
-  - Dual joysticks for vehicle and camera control.
-  - Button-based telemetry and camera feed toggling.
-  - Comprehensive real-time telemetry display.
-- **Telemetry Features**:
-  - A primary display for the 360° camera feed, complemented by FPV in a picture-in-picture (PIP) layout.
-  - Advanced sensor visualization mimicking automotive reversing systems, with animated proximity alerts.
-  - Battery level monitoring for both the vehicle and the remote control.
-
-## Hardware Specifications
-- **Microcontrollers**:
-  - Raspberry Pi: Serves as the central processing unit for AI tasks and high-level operations.
-  - Arduino: Manages low-level motor control and sensor input.
-- **Sensors**:
-  - Ultrasonic sensors designed for efficient obstacle detection.
-- **Motors**:
-  - DC or brushless motors, selected for their precision and proportional speed control.
-  - Servo or stepper motors for controlled 360° camera rotation.
-- **Power Supply**:
-  - Single or dual LiPo batteries with integrated telemetry systems to monitor power status.
-- **Chassis Design**:
-  - Combines an aluminium base with modular 3D-printed components, providing sufficient space for future expansions, such as robotic arms.
-
-## Software Framework
-- **Programming Languages**:
-  - C++: Primary language for control systems and hardware integration.
-  - Python: Planned for AI and advanced telemetry processing.
-- **UWB Integration**:
-  - Facilitates precise tracking of the remote and docking station, even through physical obstructions.
-- **AI Integration**:
-  - (Planned for Version 2) Implements localized AI for object detection, navigation, and task execution on the Raspberry Pi.
-
-## Initial Setup
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/your-username/Datalink-Rover.git
-   ```
-2. Install dependencies:
-   - For Python: Install required libraries listed in `requirements.txt`.
-   - For Arduino: Upload control scripts available in the `/arduino` directory.
-3. Assemble hardware:
-   - Construct the chassis and mount all components.
-   - Connect the power supply and verify individual subsystems.
-4. Execute software:
-   - Launch the main Raspberry Pi script to enable telemetry and remote communication.
-
-## Roadmap for Future Enhancements
-- Development of a robotic arm for object manipulation tasks.
-- Deployment of AI-driven capabilities for advanced object recognition and task automation.
-- Expansion of autonomous functionalities to handle more dynamic and complex environments.
-
-## License
-This project is distributed under the MIT License. Refer to the `LICENSE` file for additional details.
+DataLink Rover is a multi-component robotics platform built around Raspberry Pi devices, a custom Windows control application, and a self-contained wireless network.  
+The project includes a remote controller unit, a rover (car) unit, a docking station, and a Windows application for real-time monitoring and network configuration.
 
 ---
-We welcome contributions from the community! Please submit issues or pull requests to support the ongoing development of PathFinder360.
+
+# Project Overview
+
+The system consists of three primary Raspberry Pi components:
+
+- **rpiremote** – the central controller, hosting the access point and coordinating communication  
+- **rpicar** – the rover unit, responsible for movement, sensors, cameras, and telemetry  
+- **rpidock** – the docking station unit, a static reference point for alignment and charging logic  
+
+Additionally, there is a Windows application:
+
+- **Pi Monitor** – a desktop tool for viewing rover data and automatically configuring Ethernet for direct communication with the network
+
+These components work together to form a self-contained command, control, and telemetry system.
+
+---
+
+# System Architecture
+
+## Remote – rpiremote
+
+### Purpose
+The remote is the core of the DataLink Rover network.  
+It acts as the Wi-Fi access point, communication hub, and telemetry gateway.
+
+### Responsibilities
+- Hosts the wireless AP (such as “datalinkrover”)  
+- Communicates with both rover and dock  
+- Provides SSH access to all Pi units  
+- Acts as the entry point for the Windows control application  
+
+### Typical Hardware
+- Raspberry Pi 5  
+- USB-C to Ethernet adapter  
+- Raspberry Pi OS Lite  
+- SSH enabled
+
+---
+
+## Rover – rpicar
+
+### Purpose
+The rover is the mobile unit responsible for movement, sensors, and camera systems.
+
+### Responsibilities
+- Motor control and drive train logic  
+- Obstacle detection and sensor processing  
+- FPV camera streaming and 360° camera rotation  
+- Reporting telemetry (CPU, temperature, sensors, battery, etc.)  
+- Navigation and autonomous guidance (future)
+
+### Typical Hardware
+- Raspberry Pi 4 or 5  
+- Motor driver or ESCs  
+- LiPo power system  
+- FPV camera module  
+- Optional rotating top-mounted camera  
+- Ultrasonic sensors or LiDAR  
+- Optional UWB positioning module
+
+---
+
+## Docking Station – rpidock
+
+### Purpose
+A stationary Raspberry Pi that acts as a reference point for docking, guidance, and charging alignment.
+
+### Responsibilities
+- Provides a known fixed location on the network  
+- Assists rover alignment (IR/UWB planned)  
+- Supports docking workflow  
+- Handles charging logic (future)
+
+### Typical Hardware
+- Raspberry Pi Zero 2 W  
+- IR/UWB module (for alignment assistance)  
+- Charging interface (future)
+
+---
+
+# Windows Application – Pi Monitor
+
+The Pi Monitor is a Windows desktop application used for controlling Ethernet configuration and monitoring telemetry.
+
+### Current Features
+- Displays randomized telemetry for UI testing  
+- Smooth animated CPU/GPU dials  
+- Temperature and storage bars  
+- Start Rover Link button which:  
+  - Automatically configures Ethernet static IP  
+  - Sets required interface metrics  
+  - Prepares the PC for a direct link to the Raspberry Pi network  
+- Admin elevation workflow  
+- PyInstaller-built single-file executable  
+- Custom app icon  
+- Start Menu installation support
+
+### Planned Features
+- Real telemetry from all Raspberry Pi devices  
+- Rover camera feed display  
+- Online/offline detection  
+- Sensor data integration  
+- Docking status  
+- Settings and preferences panel  
+- Rover control interface  
+- Map or environmental positioning overview  
+
+---
+
+# Repository Structure (Simplified)
+
+```
+Datalink-Rover/
+  apps/
+    pi-monitor/
+      main.py
+      netconfig.py
+      ui/
+        bars.py
+        dials.py
+      icon.ico
+  remote/
+    (project files for rpiremote)
+  car/
+    (project files for rpicar)
+  dock/
+    (project files for rpidock)
+  docs/
+    (documentation)
+```
+
+Temporary build folders, virtual environments, and generated executables are excluded using `.gitignore`.
+
+---
+
+# Build and Installation
+
+## Pi Monitor
+The Windows application is built with PyInstaller:
+
+```
+pyinstaller --noconfirm --onefile --windowed --icon=icon.ico main.py
+```
+
+The resulting executable is placed in:
+
+```
+dist/DataLinkRover_PiMonitor.exe
+```
+
+It can optionally be installed to:
+
+```
+C:\Program Files\DataLink Rover\Pi Monitor\
+```
+
+A Start Menu shortcut may be created manually.
+
+---
+
+# Future Work
+
+- Full telemetry pipeline  
+- Integration of real rover sensors and camera feeds  
+- Rover control panel (manual and autonomous modes)  
+- Docking station alignment logic  
+- Local AI modules for object recognition and navigation  
+- Custom web or mobile interface  
+
+---
+
+# License
+
+All rights reserved.  
+No part of this project may be copied, modified, distributed, or used without explicit permission from the author.
 
 
