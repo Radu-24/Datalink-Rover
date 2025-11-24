@@ -61,16 +61,26 @@ def load_config():
 CONFIG = load_config()
 
 
-# ---------- ADMIN ELEVATION ----------
-def ensure_admin():
-    """If not running as administrator, relaunch this program with admin rights."""
+# ---------- ELEVATION ----------
+def is_admin() -> bool:
+    """
+    Check if we are running with administrative privileges.
+    """
     try:
-        is_admin = ctypes.windll.shell32.IsUserAnAdmin()
+        return ctypes.windll.shell32.IsUserAnAdmin()
     except Exception:
-        is_admin = False
+        return False
 
-    if is_admin:
+
+def ensure_admin():
+    """
+    Relaunch the script with admin rights if not already elevated.
+    This is required for netsh calls in netconfig.py.
+    """
+    if is_admin():
         return
+
+    print("[ADMIN] Not elevated, relaunching with admin rights...")
 
     if getattr(sys, "frozen", False):
         exe = sys.executable
@@ -196,6 +206,143 @@ def get_pi_stats_via_ssh(host: str, model: str, timeout: int = 3) -> dict:
     return stats
 
 
+# ---------- CHAINED STATS VIA RPIREMOTE ----------
+def _default_stats_dict() -> dict:
+    """Base stats structure compatible with PiCard.update_stats."""
+    return {
+        "online": False,
+        "cpu": 0,
+        "temp": 0.0,
+        "ram_percent": 0,
+        "storage_used": 0,
+        "storage_total": 32,
+        "voltage": 5.0,
+        "uptime": "N/A",
+        "gpu_clock_mhz": 0.0,
+    }
+
+
+def _get_stats_via_rpiremote_chain(kind: str, timeout: int = 5) -> dict:
+    """Ask rpiremote to SSH into rpidock / rpicar and run the dlr_*_stats.py scripts.
+
+    kind: "dock" or "car"
+    """
+    stats = _default_stats_dict()
+
+    user = CONFIG.get("ssh_user", "radu")
+    password = CONFIG.get("ssh_password", "")
+    rpiremote_host = CONFIG.get("rpiremote_host", "10.0.0.1")
+
+    if not password:
+        print(f"[SSH-CHAIN] password is EMPTY, skipping {kind} via rpiremote")
+        return stats
+
+    if kind == "dock":
+        remote_cmd = "ssh rpidock 'python3 ~/dlr_dock_stats.py'"
+    elif kind == "car":
+        remote_cmd = "ssh rpicar 'python3 ~/dlr_car_stats.py'"
+    else:
+        print(f"[SSH-CHAIN] unknown kind={kind}")
+        return stats
+
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        print(f"[SSH-CHAIN] connecting to rpiremote={rpiremote_host} as {user}")
+        client.connect(rpiremote_host, username=user, password=password, timeout=timeout)
+
+        print(f"[SSH-CHAIN] exec: {remote_cmd}")
+        stdin, stdout, stderr = client.exec_command(remote_cmd, timeout=timeout + 5)
+
+        out = stdout.read().decode().strip()
+        err = stderr.read().decode().strip()
+
+        if err:
+            print(f"[SSH-CHAIN] STDERR from rpiremote for {kind}: {err}", file=sys.stderr)
+
+        client.close()
+
+        if not out:
+            print(f"[SSH-CHAIN] EMPTY stdout for {kind} stats", file=sys.stderr)
+            return stats
+
+        # Expect a single JSON line from dlr_*_stats.py
+        try:
+            data = json.loads(out)
+        except Exception as e:
+            print(f"[SSH-CHAIN] JSON parse error for {kind}: {e}; raw={out}", file=sys.stderr)
+            return stats
+
+        # ---- Core fields ----
+        stats["online"] = bool(data.get("online", True))
+
+        cpu_val = data.get("cpu")
+        if cpu_val is not None:
+            try:
+                stats["cpu"] = int(round(float(cpu_val)))
+            except Exception:
+                pass
+
+        temp_val = data.get("temp")
+        if temp_val is not None:
+            try:
+                stats["temp"] = float(temp_val)
+            except Exception:
+                pass
+
+        ram_val = data.get("ram") or data.get("ram_percent")
+        if ram_val is not None:
+            try:
+                stats["ram_percent"] = int(round(float(ram_val)))
+            except Exception:
+                pass
+
+        storage_pct = data.get("storage")
+        if storage_pct is not None:
+            try:
+                pct = int(round(float(storage_pct)))
+                pct = max(0, min(100, pct))
+                stats["storage_total"] = 100
+                stats["storage_used"] = pct
+            except Exception:
+                pass
+
+        uptime_str = data.get("uptime")
+        if isinstance(uptime_str, str) and uptime_str.strip():
+            stats["uptime"] = uptime_str.strip()
+
+        # ---- New: voltage & GPU clock ----
+        volt_val = data.get("voltage")
+        if volt_val is not None:
+            try:
+                stats["voltage"] = float(volt_val)
+            except Exception:
+                pass
+
+        gclk_val = data.get("gpu_clock_mhz") or data.get("gpu_clock")
+        if gclk_val is not None:
+            try:
+                stats["gpu_clock_mhz"] = float(gclk_val)
+            except Exception:
+                pass
+
+    except Exception as e:
+        print(f"[SSH-CHAIN ERROR] kind={kind}, rpiremote={rpiremote_host}: {e}", file=sys.stderr)
+
+    return stats
+
+
+
+def get_rpidock_stats_via_rpiremote() -> dict:
+    """Public helper for the docking station card."""
+    return _get_stats_via_rpiremote_chain("dock")
+
+
+def get_rpicar_stats_via_rpiremote() -> dict:
+    """Public helper for the car brain card."""
+    return _get_stats_via_rpiremote_chain("car")
+
+
 # --- Global Theme ---
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
@@ -210,70 +357,57 @@ class PiMonitorApp(ctk.CTk):
         self.geometry("800x500")
         self.minsize(650, 475)
 
-        self.attributes("-alpha", 0)
-        self.pip = None
-        self.rover_link_enabled = False
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        self.monitor_running = False
-
-        # initial fake stats (before rover link)
+        # State
         self.stats_remote = fake_pi_stats("pi5")
-        self.stats_remote["uptime"] = "demo"
-
         self.stats_car = fake_pi_stats("pi5")
-        self.stats_car["uptime"] = "demo"
-
         self.stats_dock = fake_pi_stats("zero2w")
-        self.stats_dock["uptime"] = "demo"
+        self.uptime_seconds = 0
+        self.monitor_running = False
+        self.worker_thread: threading.Thread | None = None
+        self.pip: PiPWindow | None = None
 
-        self.monitor_thread = None
-
-        # ----- TOP BAR -----
-        top = ctk.CTkFrame(self, height=60)
-        top.pack(side="top", fill="x")
-
-        title = ctk.CTkLabel(
-            top,
-            text="DataLink Rover – Pi Monitor",
-            font=("Segoe UI", 28, "bold")
-        )
-        title.pack(side="left", padx=20, pady=10)
+        # Top bar
+        top_bar = ctk.CTkFrame(self, corner_radius=0)
+        top_bar.pack(side="top", fill="x")
 
         self.rover_btn = ctk.CTkButton(
-            top,
+            top_bar,
             text="Start rover link",
             command=self.toggle_rover_link
         )
-        self.rover_btn.pack(side="right", padx=20, pady=10)
+        self.rover_btn.pack(side="left", padx=10, pady=6)
 
-        pip_btn = ctk.CTkButton(
-            top,
-            text="PIP",
-            width=60,
+        self.pip_btn = ctk.CTkButton(
+            top_bar,
+            text="PiP Mode",
             command=self.open_pip
         )
-        pip_btn.pack(side="right", padx=10, pady=10)
+        self.pip_btn.pack(side="right", padx=10, pady=6)
 
-        # ----- MAIN AREA -----
-        self.main = ctk.CTkFrame(self)
-        self.main.pack(fill="both", expand=True, padx=20, pady=20)
+        # Main content
+        main = ctk.CTkFrame(self, fg_color="#101010")
+        main.pack(expand=True, fill="both", padx=10, pady=10)
 
-        for col in range(3):
-            self.main.grid_columnconfigure(col, weight=1)
-        self.main.grid_rowconfigure(0, weight=1)
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_columnconfigure(1, weight=1)
+        main.grid_columnconfigure(2, weight=1)
+        main.grid_rowconfigure(0, weight=1)
 
+        # Cards
         self.card_remote = PiCard(
-            self.main, "rpiremote", "RPi 5 (Controller)", model="pi5"
+            main, name="rpiremote", role="Controller (Pi 5)", model="pi5"
         )
         self.card_remote.grid(row=0, column=0, sticky="nsew", padx=15, pady=15)
 
         self.card_car = PiCard(
-            self.main, "rpicar", "Raspberry Pi 5 (Car)", model="pi5"
+            main, name="rpicar", role="Car brain (Pi 5)", model="pi5"
         )
         self.card_car.grid(row=0, column=1, sticky="nsew", padx=15, pady=15)
 
         self.card_dock = PiCard(
-            self.main, "rpidock", "Raspberry Pi Zero 2W", model="zero2w"
+            main, name="rpidock", role="Dock (Zero 2W)", model="zero2w"
         )
         self.card_dock.grid(row=0, column=2, sticky="nsew", padx=15, pady=15)
 
@@ -288,12 +422,12 @@ class PiMonitorApp(ctk.CTk):
         dock_host = CONFIG.get("rpidock_host", "10.0.1.5")
 
         while self.monitor_running:
+            # rpiremote: direct SSH (unchanged)
             self.stats_remote = get_pi_stats_via_ssh(remote_host, "pi5")
-            self.stats_dock = get_pi_stats_via_ssh(dock_host, "zero2w")
 
-            # car still demo
-            self.stats_car = fake_pi_stats("pi5")
-            self.stats_car["uptime"] = "demo"
+            # rpidock & rpicar stats fetched via rpiremote SSH chain
+            self.stats_dock = get_rpidock_stats_via_rpiremote()
+            self.stats_car = get_rpicar_stats_via_rpiremote()
 
             time.sleep(2)
 
@@ -301,42 +435,43 @@ class PiMonitorApp(ctk.CTk):
 
     # ----- UI UPDATE LOOP -----
     def update_loop(self):
-        remote_uptime = self.stats_remote.get("uptime", "N/A")
-        car_uptime = self.stats_car.get("uptime", remote_uptime)
-        dock_uptime = self.stats_dock.get("uptime", remote_uptime)
+        # Increase uptime counter every second (for demo when offline)
+        self.uptime_seconds += 1
+        demo_uptime = self.uptime_seconds
 
-        self.card_remote.update_stats(self.stats_remote, remote_uptime)
-        self.card_car.update_stats(self.stats_car, car_uptime)
-        self.card_dock.update_stats(self.stats_dock, dock_uptime)
+        # Update cards
+        self.card_remote.update_stats(self.stats_remote, self.stats_remote.get("uptime", "N/A"))
+        self.card_car.update_stats(self.stats_car, self.stats_car.get("uptime", f"{demo_uptime}s"))
+        self.card_dock.update_stats(self.stats_dock, self.stats_dock.get("uptime", "N/A"))
 
+        # Update PiP if open
         if self.pip is not None and self.pip.winfo_exists():
-            self.pip.update_stats(self.stats_remote, remote_uptime)
+            self.pip.update_stats(self.stats_remote, self.stats_car, self.stats_dock)
 
-        self.after(500, self.update_loop)
+        self.after(1000, self.update_loop)
 
-    # ----- START/STOP ROVER LINK -----
+    # ----- ROVER LINK TOGGLE -----
     def toggle_rover_link(self):
-        try:
-            if not self.rover_link_enabled:
+        if not self.monitor_running:
+            # Start rover link (netsh to 10.0.0.10 etc.)
+            try:
                 enable_rover_link()
-                self.rover_link_enabled = True
-                self.monitor_running = True
-                self.rover_btn.configure(text="Stop rover link")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to enable rover link:\n{e}")
+                return
 
-                if self.monitor_thread is None or not self.monitor_thread.is_alive():
-                    self.monitor_thread = threading.Thread(
-                        target=self.monitor_worker, daemon=True
-                    )
-                    self.monitor_thread.start()
-            else:
-                disable_rover_link()
-                self.rover_link_enabled = False
-                self.monitor_running = False
-                self.rover_btn.configure(text="Start rover link")
-        except Exception as e:
-            messagebox.showerror("Network error", str(e))
-            self.rover_link_enabled = False
+            self.monitor_running = True
+            self.worker_thread = threading.Thread(target=self.monitor_worker, daemon=True)
+            self.worker_thread.start()
+            self.rover_btn.configure(text="Stop rover link")
+        else:
+            # Stop rover link
             self.monitor_running = False
+            try:
+                disable_rover_link()
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to disable rover link:\n{e}")
+
             self.rover_btn.configure(text="Start rover link")
 
     # ----- PIP -----
@@ -345,6 +480,11 @@ class PiMonitorApp(ctk.CTk):
             self.pip = PiPWindow(self)
         else:
             self.pip.focus()
+
+    # ----- CLOSE -----
+    def on_close(self):
+        self.monitor_running = False
+        self.destroy()
 
 
 if __name__ == "__main__":
