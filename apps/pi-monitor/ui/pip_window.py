@@ -1,221 +1,138 @@
+# apps/pi-monitor/ui/pip_window.py
+
 import customtkinter as ctk
-from ui.colors import cpu_color, gpu_color, temp_color, storage_color, voltage_color
+
+
+class _PiRow(ctk.CTkFrame):
+    """
+    Compact single-line row in the PiP window:
+    [LED] name  |  CPU xx%  |  T xx°C  |  RAM xx%  |  Disk xx%
+    """
+
+    def __init__(self, master, name: str, role: str):
+        super().__init__(master, fg_color="#151515", corner_radius=6)
+        self.name = name
+
+        self.grid_columnconfigure(2, weight=1)
+
+        small_font = ctk.CTkFont(size=10)
+        title_font = ctk.CTkFont(size=11, weight="bold")
+
+        # LED
+        self.led = ctk.CTkLabel(self, text="●", width=18, anchor="center")
+        self.led.grid(row=0, column=0, padx=(6, 2), pady=3, sticky="w")
+
+        # Name
+        self.title_label = ctk.CTkLabel(
+            self,
+            text=f"{name} – {role}",
+            font=title_font,
+            anchor="w",
+        )
+        self.title_label.grid(row=0, column=1, sticky="w", padx=(2, 4), pady=3)
+
+        # Metrics (all in one short line)
+        self.metrics_label = ctk.CTkLabel(
+            self,
+            text="CPU 0% | T 0°C | RAM 0% | Disk 0%",
+            font=small_font,
+            anchor="w",
+        )
+        self.metrics_label.grid(row=0, column=2, sticky="ew", padx=(2, 6), pady=3)
+
+        self._blink_phase = 0
+        self._online = False
+        self._start_blink()
+
+    def _start_blink(self):
+        """
+        Simple blink only for OFFLINE (red). Online stays solid.
+        Blink slightly faster for clearer “offline” feedback.
+        """
+        if not self._online:
+            self._blink_phase = 1 - self._blink_phase
+            if self._blink_phase:
+                self.led.configure(text_color="#ff3b3b")   # bright red
+            else:
+                self.led.configure(text_color="#802020")   # dim red
+        self.after(90, self._start_blink)  # small, fast blink
+
+    def update_from_stats(self, stats: dict):
+        """
+        stats is the same dict used for PiCard.update_stats:
+        online, cpu, temp, ram_percent, storage_used/total, voltage, uptime, gpu_clock_mhz
+        """
+        online = bool(stats.get("online", False))
+        self._online = online
+
+        cpu = int(stats.get("cpu", 0) or 0)
+        temp = float(stats.get("temp", 0.0) or 0.0)
+        ram = int(stats.get("ram_percent", 0) or 0)
+
+        used = int(stats.get("storage_used", 0) or 0)
+        total = int(stats.get("storage_total", 100) or 100)
+        disk_pct = 0
+        if total > 0:
+            disk_pct = int(round(used * 100.0 / total))
+
+        # LED color when online
+        if online:
+            if temp >= 75 or cpu >= 90:
+                color = "#ffb03b"  # orange – hot
+            else:
+                color = "#00ff66"  # green – OK
+            self.led.configure(text_color=color)
+        else:
+            # offline: blinking logic handles colors
+            self.led.configure(text_color="#ff3b3b")
+
+        # Update metrics line (short, fits on one line)
+        self.metrics_label.configure(
+            text=f"CPU {cpu}% | T {int(round(temp))}°C | RAM {ram}% | Disk {disk_pct}%"
+        )
 
 
 class PiPWindow(ctk.CTkToplevel):
     """
-    Floating Picture-in-Picture window.
-    Shows minimal stats for the selected Pi.
-    Auto-resizes its content based on window width.
+    Small always-on-top window showing a compact row per Pi.
+    main.py calls:
+        pip = PiPWindow(root)
+        pip.update_stats(remote_stats, car_stats, dock_stats)
     """
 
     def __init__(self, master):
         super().__init__(master)
-
-        self.title("PiP – Pi Monitor")
-        self.geometry("420x260")
-        self.minsize(200, 80)
+        self.title("Pi Monitor – PiP")
+        # Smaller default size so the whole window fits nicely
+        self.geometry("420x150")
+        self.minsize(380, 130)
         self.attributes("-topmost", True)
 
-        self.scale = 1.0
+        self.configure(fg_color="#0b0b0b")
 
-        # Current stats snapshot
-        self.current_stats = None
-        self.current_uptime = "--"
+        # Main container
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=1)
 
-        # --- Layout Containers ---
-        self.main_frame = ctk.CTkFrame(self)
-        self.main_frame.pack(fill="both", expand=True, padx=8, pady=8)
+        wrapper = ctk.CTkFrame(self, fg_color="#101010", corner_radius=10)
+        wrapper.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
 
-        self.header = ctk.CTkFrame(self.main_frame, fg_color="transparent")
-        self.header.pack(fill="x")
+        wrapper.grid_columnconfigure(0, weight=1)
 
-        self.name_label = ctk.CTkLabel(
-            self.header, text="rpiremote (PiP)", font=("Segoe UI", 15, "bold")
-        )
-        self.name_label.pack(side="left")
+        # Each Pi in a single, thin row
+        self.row_remote = _PiRow(wrapper, "rpiremote", "Controller")
+        self.row_remote.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
 
-        self.mode_label = ctk.CTkLabel(
-            self.header, text="Mode: Large", font=("Segoe UI", 11)
-        )
-        self.mode_label.pack(side="right")
+        self.row_car = _PiRow(wrapper, "rpicar", "Car")
+        self.row_car.grid(row=1, column=0, sticky="ew", padx=4, pady=2)
 
-        # Containers for different modes
-        self.large_frame = ctk.CTkFrame(self.main_frame)
-        self.medium_frame = ctk.CTkFrame(self.main_frame)
-        self.small_frame = ctk.CTkFrame(self.main_frame)
+        self.row_dock = _PiRow(wrapper, "rpidock", "Dock")
+        self.row_dock.grid(row=2, column=0, sticky="ew", padx=4, pady=(2, 4))
 
-        # --- LARGE MODE WIDGETS (sliders & text) ---
-        self.l_cpu = ctk.CTkProgressBar(self.large_frame, width=280, height=16)
-        self.l_cpu.pack(pady=(8, 2))
-        self.l_cpu_label = ctk.CTkLabel(self.large_frame, text="CPU: -- %")
-        self.l_cpu_label.pack()
-
-        self.l_gpu = ctk.CTkProgressBar(self.large_frame, width=280, height=16)
-        self.l_gpu.pack(pady=(8, 2))
-        self.l_gpu_label = ctk.CTkLabel(self.large_frame, text="GPU: -- % / N/A")
-        self.l_gpu_label.pack()
-
-        self.l_temp = ctk.CTkProgressBar(self.large_frame, width=280, height=16)
-        self.l_temp.pack(pady=(8, 2))
-        self.l_temp_label = ctk.CTkLabel(self.large_frame, text="Temp: -- °C")
-        self.l_temp_label.pack()
-
-        self.l_storage = ctk.CTkProgressBar(self.large_frame, width=280, height=16)
-        self.l_storage.pack(pady=(8, 2))
-        self.l_storage_label = ctk.CTkLabel(self.large_frame, text="Storage: --")
-        self.l_storage_label.pack()
-
-        self.l_voltage_label = ctk.CTkLabel(self.large_frame, text="Voltage: -- V")
-        self.l_voltage_label.pack(pady=(8, 2))
-
-        self.l_uptime_label = ctk.CTkLabel(self.large_frame, text="Uptime: --")
-        self.l_uptime_label.pack(pady=(0, 4))
-
-        # --- MEDIUM MODE WIDGETS (text only) ---
-        self.m_cpu = ctk.CTkLabel(self.medium_frame, text="CPU: -- %")
-        self.m_cpu.pack(pady=(4, 0))
-        self.m_gpu = ctk.CTkLabel(self.medium_frame, text="GPU: -- % / N/A")
-        self.m_gpu.pack()
-        self.m_temp = ctk.CTkLabel(self.medium_frame, text="Temp: -- °C")
-        self.m_temp.pack()
-        self.m_storage = ctk.CTkLabel(self.medium_frame, text="Storage: --")
-        self.m_storage.pack()
-        self.m_voltage = ctk.CTkLabel(self.medium_frame, text="Voltage: -- V")
-        self.m_voltage.pack()
-        self.m_uptime = ctk.CTkLabel(self.medium_frame, text="Uptime: --")
-        self.m_uptime.pack(pady=(0, 4))
-
-        # --- SMALL MODE WIDGET (single line) ---
-        self.s_compact = ctk.CTkLabel(self.small_frame, text="CPU --% | -- °C")
-        self.s_compact.pack(pady=10)
-
-        # Start in large mode by default
-        self.current_mode = None
-        self._show_large_mode()
-
-        # React to resize
-        self.bind("<Configure>", self.on_resize)
-
-    # ---------- MODE SWITCHING ----------
-    def _clear_modes(self):
-        for f in (self.large_frame, self.medium_frame, self.small_frame):
-            f.pack_forget()
-
-    def _show_large_mode(self):
-        self._clear_modes()
-        self.large_frame.pack(fill="both", expand=True)
-        self.current_mode = "large"
-        self.mode_label.configure(text="Mode: Large")
-
-    def _show_medium_mode(self):
-        self._clear_modes()
-        self.medium_frame.pack(fill="both", expand=True)
-        self.current_mode = "medium"
-        self.mode_label.configure(text="Mode: Medium")
-
-    def _show_small_mode(self):
-        self._clear_modes()
-        self.small_frame.pack(fill="both", expand=True)
-        self.current_mode = "small"
-        self.mode_label.configure(text="Mode: Compact")
-
-    # ---------- RESIZE HANDLER ----------
-    def on_resize(self, event):
-        width = event.width
-
-        if width >= 380:
-            if self.current_mode != "large":
-                self._show_large_mode()
-        elif width >= 240:
-            if self.current_mode != "medium":
-                self._show_medium_mode()
-        else:
-            if self.current_mode != "small":
-                self._show_small_mode()
-
-    # ---------- PUBLIC API ----------
-    def update_stats(self, stats: dict, uptime: str):
+    def update_stats(self, stats_remote: dict, stats_car: dict, stats_dock: dict):
         """
-        Update PiP contents with the same stats used by the cards.
-        stats keys: cpu, gpu, temp, storage_used, storage_total, voltage
+        Called periodically from main.update_loop().
         """
-        self.current_stats = stats
-        self.current_uptime = uptime
-
-        cpu = stats["cpu"]
-        gpu = stats["gpu"]
-        temp = stats["temp"]
-        used = stats["storage_used"]
-        total = stats["storage_total"]
-        voltage = stats["voltage"]
-
-        # STORAGE %
-        percent = int((used / total) * 100) if total > 0 else 0
-
-        # --- LARGE MODE values ---
-        self.l_cpu.set(cpu / 100)
-        self.l_cpu.configure(progress_color=cpu_color(cpu))
-        self.l_cpu_label.configure(text=f"CPU: {cpu}%")
-
-        if gpu is None:
-            self.l_gpu.set(0)
-            self.l_gpu.configure(progress_color="#777777")
-            self.l_gpu_label.configure(text="GPU: N/A")
-        else:
-            self.l_gpu.set(gpu / 100)
-            self.l_gpu.configure(progress_color=gpu_color(gpu))
-            self.l_gpu_label.configure(text=f"GPU: {gpu}%")
-
-        self.l_temp.set(min(temp / 100, 1))
-        self.l_temp.configure(progress_color=temp_color("pi5", temp))
-        self.l_temp_label.configure(text=f"Temp: {temp} °C")
-
-        self.l_storage.set(percent / 100)
-        self.l_storage.configure(progress_color=storage_color(percent))
-        self.l_storage_label.configure(text=f"Storage: {used}/{total} GB ({percent}%)")
-
-        self.l_voltage_label.configure(text=f"Voltage: {voltage} V", text_color=voltage_color(voltage))
-        self.l_uptime_label.configure(text=f"Uptime: {uptime}")
-
-        # --- MEDIUM MODE values ---
-        self.m_cpu.configure(text=f"CPU: {cpu}%")
-        self.m_gpu.configure(text="GPU: N/A" if gpu is None else f"GPU: {gpu}%")
-        self.m_temp.configure(text=f"Temp: {temp} °C")
-        self.m_storage.configure(text=f"Storage: {used}/{total} GB ({percent}%)")
-        self.m_voltage.configure(text=f"Voltage: {voltage} V", text_color=voltage_color(voltage))
-        self.m_uptime.configure(text=f"Uptime: {uptime}")
-
-        # --- SMALL MODE compact line ---
-        self.s_compact.configure(text=f"CPU {cpu}% | {temp} °C")
-
-    def set_name(self, name: str):
-        self.name_label.configure(text=f"{name} (PiP)")
-
-    def set_scale(self, scale: float):
-        """Optionally adjust fonts based on global scaling."""
-        self.scale = scale
-        base = max(9, int(13 * scale))
-        big = max(11, int(15 * scale))
-
-        self.name_label.configure(font=("Segoe UI", big, "bold"))
-        self.mode_label.configure(font=("Segoe UI", max(9, int(11 * scale))))
-
-        # Large mode fonts
-        self.l_cpu_label.configure(font=("Segoe UI", base))
-        self.l_gpu_label.configure(font=("Segoe UI", base))
-        self.l_temp_label.configure(font=("Segoe UI", base))
-        self.l_storage_label.configure(font=("Segoe UI", base))
-        self.l_voltage_label.configure(font=("Segoe UI", base))
-        self.l_uptime_label.configure(font=("Segoe UI", base))
-
-        # Medium mode fonts
-        self.m_cpu.configure(font=("Segoe UI", base))
-        self.m_gpu.configure(font=("Segoe UI", base))
-        self.m_temp.configure(font=("Segoe UI", base))
-        self.m_storage.configure(font=("Segoe UI", base))
-        self.m_voltage.configure(font=("Segoe UI", base))
-        self.m_uptime.configure(font=("Segoe UI", base))
-
-        # Small mode font
-        self.s_compact.configure(font=("Segoe UI", base))
+        self.row_remote.update_from_stats(stats_remote or {})
+        self.row_car.update_from_stats(stats_car or {})
+        self.row_dock.update_from_stats(stats_dock or {})

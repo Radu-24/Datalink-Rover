@@ -1,88 +1,149 @@
+# apps/pi-monitor/ui/leds.py
+
 import customtkinter as ctk
 
 
-class StatusLED(ctk.CTkFrame):
+class StatusLED(ctk.CTkCanvas):
     """
-    Neon status LED with pulsing / blinking behavior.
-    Auto-resizes using set_scale().
+    Small circular LED with support for:
+    - online / offline state
+    - severity levels: "ok", "warn", "error"
+    - fast blinking for offline/error
     """
 
-    def __init__(self, parent):
-        super().__init__(parent, fg_color="transparent")
-
-        # Canvas for drawing LED
-        self.canvas = ctk.CTkCanvas(
-            self, width=22, height=22,
-            bg="#000000",  # dark background
-            highlightthickness=0
-        )
-        self.canvas.pack()
-
-        self.color = "#00ff88"   # default neon green
-        self.blinking = False
-        self.fast_blink = False
-
-        self.size = 22   # will scale dynamically
-
-        self.draw()
-
-    # ---------- DRAW LED ----------
-    def draw(self):
-        self.canvas.delete("all")
-
-        # Glow shadow (outer circle)
-        self.canvas.create_oval(
-            2, 2, self.size, self.size,
-            fill=self._dim_color(self.color, 0.25),
-            outline=""
+    def __init__(self, master, size: int = 18, fast_blink: bool = True, **kwargs):
+        # IMPORTANT: do NOT use bg="transparent" here, Tk doesn't support it.
+        super().__init__(
+            master,
+            width=size,
+            height=size,
+            highlightthickness=0,
+            bd=0,
+            **kwargs,
         )
 
-        # Main LED circle
-        self.canvas.create_oval(
-            4, 4, self.size - 2, self.size - 2,
-            fill=self.color,
-            outline=""
+        self.size = size
+        self.radius = size // 2 - 1
+
+        # State flags
+        self.online = False
+        self.fast_blink = fast_blink  # used for offline/error blinking
+        self._blink_state = False
+        self.current_alpha = 1.0
+
+        # Base colors
+        self._color_ok = "#00ff66"     # green
+        self._color_warn = "#ffb03b"   # orange
+        self._color_error = "#ff3b3b"  # red
+
+        self._current_color = self._color_error  # default: red offline
+
+        # Draw once and keep item id
+        self.led_circle = self.create_oval(
+            1,
+            1,
+            self.size - 1,
+            self.size - 1,
+            fill=self._current_color,
+            outline="",
         )
 
-    # ---------- SET COLOR ----------
-    def set_color(self, color, blink=False, fast=False):
-        self.color = color
-        self.blinking = blink
-        self.fast_blink = fast
-        self.draw()
+        # Start animation loop
+        self.animate()
 
-    # ---------- BLINK ANIMATION ----------
-    def animate(self):
-        if self.blinking:
-            # Toggle visibility by dimming LED
-            if self.fast_blink:
-                self.color = self._dim_color(self.color, 0.4)
-            else:
-                self.color = self._dim_color(self.color, 0.7)
+    # ---------- Public API ----------
 
-            self.draw()
+    def set_status(self, online: bool, level: str = "ok"):
+        """
+        Unified method that most callers can use.
 
-        # Schedule next frame
-        self.after(250 if not self.fast_blink else 120, self.animate)
+        level: "ok", "warn", "error"
+        """
+        self.online = bool(online)
 
-    # ---------- UTILITY: DIM COLOR ----------
-    def _dim_color(self, hex_color, factor):
-        """Fade a hex color by factor (0–1)."""
+        if level == "warn":
+            self._current_color = self._color_warn
+        elif level == "error":
+            self._current_color = self._color_error
+        else:
+            self._current_color = self._color_ok
+
+        # When online, keep LED fully bright and solid.
+        # When offline, blinking logic in animate() will handle brightness.
+        if self.online:
+            self.current_alpha = 1.0
+        self._redraw()
+
+    def set_online(self, online: bool):
+        """
+        Convenience method if caller only knows online/offline.
+        """
+        # If going offline and no level set, treat as error (red).
+        if not online:
+            self.set_status(False, "error")
+        else:
+            self.set_status(True, "ok")
+
+    def set_color(self, hex_color: str):
+        """
+        Optional: directly set a color (bypasses level mapping).
+        """
+        self._current_color = hex_color
+        self._redraw()
+
+    # ---------- Internal drawing ----------
+
+    def _apply_alpha(self, hex_color: str, alpha: float) -> str:
+        """
+        Fake alpha by mixing towards black. Tk doesn't support real alpha on fills.
+        """
         hex_color = hex_color.lstrip("#")
-        r = int(hex_color[0:2], 16)
-        g = int(hex_color[2:4], 16)
-        b = int(hex_color[4:6], 16)
+        if len(hex_color) != 6:
+            return "#" + hex_color
 
-        r = int(r * factor)
-        g = int(g * factor)
-        b = int(b * factor)
+        try:
+            r = int(hex_color[0:2], 16)
+            g = int(hex_color[2:4], 16)
+            b = int(hex_color[4:6], 16)
+        except ValueError:
+            return "#" + hex_color
+
+        r = int(r * alpha)
+        g = int(g * alpha)
+        b = int(b * alpha)
 
         return f"#{r:02x}{g:02x}{b:02x}"
 
-    # ---------- SCALING ----------
-    def set_scale(self, scale):
-        new_size = max(14, int(22 * scale))
-        if new_size != self.size:
-            self.size = new_size
-            self.canvas.config(width=self.size, height=self.size)
-            self.draw()
+    def _redraw(self):
+        color = self._apply_alpha(self._current_color, self.current_alpha)
+        self.itemconfigure(self.led_circle, fill=color)
+
+    # ---------- Blink animation loop ----------
+
+    def animate(self):
+        """
+        Blink logic:
+        - When online: LED is solid (no blink).
+        - When offline (online == False): blink.
+          If fast_blink is True, blink faster (used for red error state).
+        """
+        if not self.online:
+            # toggle visible state
+            self._blink_state = not self._blink_state
+
+            if self._blink_state:
+                # full brightness
+                self.current_alpha = 1.0
+            else:
+                # dimmed
+                self.current_alpha = 0.3
+
+            self._redraw()
+        else:
+            # online -> ensure full brightness
+            self.current_alpha = 1.0
+            self._redraw()
+
+        # timing: normal blink = 250 ms, fast blink (red offline) = 90 ms
+        delay = 250 if not self.fast_blink else 90
+        self.after(delay, self.animate)

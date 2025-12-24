@@ -5,13 +5,15 @@ import re
 import time
 import threading
 import json
+import sys
 
 import customtkinter as ctk
+from tkinter import messagebox
+
 from ui.picard import PiCard
 from ui.pip_window import PiPWindow
-from utils import fake_pi_stats
 from ui.animations import fade_in_window
-from tkinter import messagebox
+from utils import fake_pi_stats  # still available if you ever want demo mode
 from netconfig import enable_rover_link, disable_rover_link
 
 import paramiko
@@ -29,7 +31,7 @@ def load_config():
         "ssh_password": "",
         "rpiremote_host": "10.0.0.1",
         "rpidock_host": "10.0.1.5",
-        "rpicar_host": "10.0.1.3"
+        "rpicar_host": "10.0.1.3",
     }
 
     try:
@@ -63,9 +65,7 @@ CONFIG = load_config()
 
 # ---------- ELEVATION ----------
 def is_admin() -> bool:
-    """
-    Check if we are running with administrative privileges.
-    """
+    """Check if we are running with administrative privileges."""
     try:
         return ctypes.windll.shell32.IsUserAnAdmin()
     except Exception:
@@ -104,7 +104,31 @@ def ensure_admin():
     sys.exit()
 
 
-# ---------- REAL SSH STATS ----------
+# ---------- OFFLINE / DEFAULT STATS ----------
+def _default_stats_dict() -> dict:
+    """Base stats structure compatible with PiCard.update_stats."""
+    return {
+        "online": False,
+        "cpu": 0,
+        "temp": 0.0,
+        "ram_percent": 0,
+        "storage_used": 0,
+        "storage_total": 100,
+        "voltage": 5.0,
+        "uptime": "N/A",
+        "gpu_clock_mhz": 0.0,
+    }
+
+
+def make_offline_stats() -> dict:
+    """
+    Default OFFLINE stats used when the rover link is not active.
+    Everything shows 0, voltage 5.0 V, uptime N/A; LEDs will blink red.
+    """
+    return _default_stats_dict().copy()
+
+
+# ---------- REAL SSH STATS (direct) ----------
 def get_pi_stats_via_ssh(host: str, model: str, timeout: int = 3) -> dict:
     """
     Return a stats dict compatible with PiCard.update_stats:
@@ -116,17 +140,7 @@ def get_pi_stats_via_ssh(host: str, model: str, timeout: int = 3) -> dict:
 
     print(f"[SSH] trying host={host}, user={user}, pass_len={len(password)}")
 
-    stats = {
-        "online": False,
-        "cpu": 0,
-        "temp": 0.0,
-        "ram_percent": 0,
-        "storage_used": 0,
-        "storage_total": 32,
-        "voltage": 5.0,
-        "uptime": "N/A",
-        "gpu_clock_mhz": 0.0,
-    }
+    stats = _default_stats_dict()
 
     if not password:
         print(f"[SSH] password is EMPTY, skipping connect to {host}")
@@ -207,21 +221,6 @@ def get_pi_stats_via_ssh(host: str, model: str, timeout: int = 3) -> dict:
 
 
 # ---------- CHAINED STATS VIA RPIREMOTE ----------
-def _default_stats_dict() -> dict:
-    """Base stats structure compatible with PiCard.update_stats."""
-    return {
-        "online": False,
-        "cpu": 0,
-        "temp": 0.0,
-        "ram_percent": 0,
-        "storage_used": 0,
-        "storage_total": 32,
-        "voltage": 5.0,
-        "uptime": "N/A",
-        "gpu_clock_mhz": 0.0,
-    }
-
-
 def _get_stats_via_rpiremote_chain(kind: str, timeout: int = 5) -> dict:
     """Ask rpiremote to SSH into rpidock / rpicar and run the dlr_*_stats.py scripts.
 
@@ -311,7 +310,7 @@ def _get_stats_via_rpiremote_chain(kind: str, timeout: int = 5) -> dict:
         if isinstance(uptime_str, str) and uptime_str.strip():
             stats["uptime"] = uptime_str.strip()
 
-        # ---- New: voltage & GPU clock ----
+        # ---- Voltage & GPU clock ----
         volt_val = data.get("voltage")
         if volt_val is not None:
             try:
@@ -330,7 +329,6 @@ def _get_stats_via_rpiremote_chain(kind: str, timeout: int = 5) -> dict:
         print(f"[SSH-CHAIN ERROR] kind={kind}, rpiremote={rpiremote_host}: {e}", file=sys.stderr)
 
     return stats
-
 
 
 def get_rpidock_stats_via_rpiremote() -> dict:
@@ -360,13 +358,15 @@ class PiMonitorApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # State
-        self.stats_remote = fake_pi_stats("pi5")
-        self.stats_car = fake_pi_stats("pi5")
-        self.stats_dock = fake_pi_stats("zero2w")
-        self.uptime_seconds = 0
         self.monitor_running = False
         self.worker_thread: threading.Thread | None = None
         self.pip: PiPWindow | None = None
+        self.uptime_seconds = 0
+
+        # Initial OFF state: all cards offline, zeros + red blinking LEDs
+        self.stats_remote = make_offline_stats()
+        self.stats_car = make_offline_stats()
+        self.stats_dock = make_offline_stats()
 
         # Top bar
         top_bar = ctk.CTkFrame(self, corner_radius=0)
@@ -419,10 +419,9 @@ class PiMonitorApp(ctk.CTk):
         print("[WORKER] started")
 
         remote_host = CONFIG.get("rpiremote_host", "10.0.0.1")
-        dock_host = CONFIG.get("rpidock_host", "10.0.1.5")
 
         while self.monitor_running:
-            # rpiremote: direct SSH (unchanged)
+            # rpiremote: direct SSH
             self.stats_remote = get_pi_stats_via_ssh(remote_host, "pi5")
 
             # rpidock & rpicar stats fetched via rpiremote SSH chain
@@ -435,13 +434,12 @@ class PiMonitorApp(ctk.CTk):
 
     # ----- UI UPDATE LOOP -----
     def update_loop(self):
-        # Increase uptime counter every second (for demo when offline)
+        # Increase uptime counter every second (for demo / fallback)
         self.uptime_seconds += 1
-        demo_uptime = self.uptime_seconds
 
         # Update cards
         self.card_remote.update_stats(self.stats_remote, self.stats_remote.get("uptime", "N/A"))
-        self.card_car.update_stats(self.stats_car, self.stats_car.get("uptime", f"{demo_uptime}s"))
+        self.card_car.update_stats(self.stats_car, self.stats_car.get("uptime", "N/A"))
         self.card_dock.update_stats(self.stats_dock, self.stats_dock.get("uptime", "N/A"))
 
         # Update PiP if open
@@ -458,6 +456,12 @@ class PiMonitorApp(ctk.CTk):
                 enable_rover_link()
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to enable rover link:\n{e}")
+                self.monitor_running = False
+                # Back to offline state
+                self.stats_remote = make_offline_stats()
+                self.stats_car = make_offline_stats()
+                self.stats_dock = make_offline_stats()
+                self.rover_btn.configure(text="Start rover link")
                 return
 
             self.monitor_running = True
@@ -471,7 +475,10 @@ class PiMonitorApp(ctk.CTk):
                 disable_rover_link()
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to disable rover link:\n{e}")
-
+            # Immediately go back to OFF state
+            self.stats_remote = make_offline_stats()
+            self.stats_car = make_offline_stats()
+            self.stats_dock = make_offline_stats()
             self.rover_btn.configure(text="Start rover link")
 
     # ----- PIP -----
