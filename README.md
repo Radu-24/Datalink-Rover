@@ -164,6 +164,24 @@ A Start Menu shortcut may be created manually.
 
 ---
 
+# Rover Simulation – DataLink Sim
+
+DataLink Sim is a standalone Python simulation environment designed to train Reinforcement Learning (RL) agents for autonomous docking and navigation without risking physical hardware.
+
+### Purpose
+To provide a rapid, safe, and accurate training ground for the rover's AI. It replicates the physics, kinematics, and sensor suite of the real rover, allowing the AI to learn "Return-To-Home" (RTH) logic via trial and error.
+
+### Key Features
+- **Physics Engine:** Simulates 2D rover dynamics, friction, collisions, and charging pin contact logic.
+- **Sensor Suite:** Replicates real-world sensors including LiDAR, Ultrasonic (Proximity), Infrared (IR) alignment beams, and UWB distance.
+- **AI Training Mode:** A dedicated high-speed loop that locks user input and creates instant-reset scenarios for efficient neural network training.
+- **Procedural Generation:** Generates random maps with variable difficulty (Easy, Medium, Hard) to ensure robust AI learning.
+- **Safety Assist:** Includes a "ParkPilot" system for Manual mode that automatically slows or stops the rover to prevent collisions.
+
+**Controls:** `WASD` for movement, `SPACE` for brake.
+
+---
+
 # Future Work
 
 - Full telemetry pipeline  
