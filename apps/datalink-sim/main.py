@@ -2,6 +2,9 @@ import pygame
 import sys
 import math
 import numpy as np
+import os
+import glob
+from stable_baselines3 import PPO 
 from config import *
 from core.environment import RoverEnv
 from core.raycast import ray_segment_intersection
@@ -33,10 +36,42 @@ def main():
     dock_timer = 0
     has_left_dock = False
     
-    # MASTER SWITCH FOR AI TRAINING
     ai_train_active = False
-    
-    env.reset()
+    ai_model = None
+
+    # --- HELPER: FIND LATEST MODEL ---
+    def load_latest_model():
+        nonlocal ai_model
+        models_dir = "models/PPO"
+        
+        if not os.path.exists(models_dir):
+            print(f"Waiting for training... Directory {models_dir} not found yet.")
+            return False
+
+        # Get list of all .zip files
+        list_of_files = glob.glob(f'{models_dir}/*.zip') 
+        
+        if not list_of_files:
+            print("Waiting for training... No models found in folder yet.")
+            return False
+
+        # Find the one with the most recent modification time
+        latest_file = max(list_of_files, key=os.path.getmtime)
+        
+        print(f"LOADING LATEST AI MODEL: {latest_file}")
+        try:
+            ai_model = PPO.load(latest_file)
+            print("Model loaded successfully!")
+            return True
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return False
+
+    # Attempt load at startup
+    load_latest_model()
+
+    # Initialize environment
+    obs, _ = env.reset()
     font_menu = pygame.font.SysFont("Arial", 24)
     
     # State Switchers
@@ -50,9 +85,9 @@ def main():
         current_state = STATE_DIFF_MENU
 
     def set_difficulty(diff_preset):
-        nonlocal current_state
+        nonlocal current_state, obs
         env.current_difficulty = diff_preset
-        env.reset()
+        obs, _ = env.reset()
         current_state = STATE_RUNNING
         
     def close_diff_menu():
@@ -60,11 +95,11 @@ def main():
         current_state = STATE_RUNNING
 
     def set_mode(mode):
-        nonlocal current_mode, has_left_dock
+        nonlocal current_mode, has_left_dock, obs
         current_mode = mode
         if mode == MODE_PATH: env.spawn_on_dock_setting = True
         else: env.spawn_on_dock_setting = setting_spawn_on_dock
-        env.reset()
+        obs, _ = env.reset()
         has_left_dock = False
         if current_state == STATE_MENU: toggle_menu()
 
@@ -78,17 +113,22 @@ def main():
         show_sensors = not show_sensors
 
     def toggle_ai_train():
-        nonlocal ai_train_active, current_mode
-        ai_train_active = not ai_train_active
+        nonlocal ai_train_active, current_mode, ai_model
         
+        if ai_model is None:
+            print("AI Button Pressed: Searching for new models...")
+            success = load_latest_model()
+            if not success:
+                return 
+
+        ai_train_active = not ai_train_active
         if ai_train_active:
-            # LOCKDOWN: Force RTH, Close Menus
             current_mode = MODE_RTH
-            current_state = STATE_RUNNING # Force close menu if open
+            current_state = STATE_RUNNING
 
     def reset_sim():
-        nonlocal has_left_dock
-        env.reset()
+        nonlocal has_left_dock, obs
+        obs, _ = env.reset()
         has_left_dock = False
 
     def draw_blocked_beam(surface, start_pos, start_angle, end_angle, color, obstacles):
@@ -162,70 +202,61 @@ def main():
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE: close_diff_menu()
 
         if current_state == STATE_RUNNING:
-            keys = pygame.key.get_pressed()
-            pwm_l, pwm_r = 0, 0
-            PWM_POWER = 220 
             
-            # Check for docking mode to slow down
-            rear_data = env.sensors.rear.get_data()
-            # If any rear sensor is picking up signal, slow down
-            is_docking_mode = (rear_data[2] > 0.1 or rear_data[3] > 0.1)
-            turn_power = PWM_POWER
-            if is_docking_mode: turn_power *= 0.3 
-
-            # ==========================================
-            #           CONTROL LOGIC BLOCK
-            # ==========================================
-            
-            if ai_train_active:
-                # LOCKED
-                pwm_l, pwm_r = 0, 0 
+            # --- AI CONTROL LOGIC ---
+            if ai_train_active and ai_model is not None:
+                # Predict action
+                action, _states = ai_model.predict(obs, deterministic=True)
+                
+                # Sanitize Output
+                if not np.isfinite(action).all():
+                    print("WARNING: AI output NaN/Inf! Resetting env.")
+                    action = np.zeros_like(action)
+                    obs, _ = env.reset()
+                
+                # Step
+                obs, reward, terminated, truncated, info = env.step(action)
+                
+                # Back-calculate PWM for UI text
+                env.rover.pwm_l = action[0] * 255
+                env.rover.pwm_r = action[1] * 255
                 
             else:
-                # MANUAL
-                if keys[pygame.K_w]: pwm_l += PWM_POWER; pwm_r += PWM_POWER
-                if keys[pygame.K_s]: pwm_l -= PWM_POWER; pwm_r -= PWM_POWER
-                if keys[pygame.K_a]: pwm_l -= turn_power; pwm_r += turn_power
-                if keys[pygame.K_d]: pwm_l += turn_power; pwm_r -= turn_power
+                # --- MANUAL CONTROL LOGIC ---
+                keys = pygame.key.get_pressed()
+                pwm_l, pwm_r = 0, 0
+                MANUAL_POWER = 255 
+                
+                if keys[pygame.K_w]: pwm_l += MANUAL_POWER; pwm_r += MANUAL_POWER
+                if keys[pygame.K_s]: pwm_l -= MANUAL_POWER; pwm_r -= MANUAL_POWER
+                if keys[pygame.K_a]: pwm_l -= MANUAL_POWER; pwm_r += MANUAL_POWER
+                if keys[pygame.K_d]: pwm_l += MANUAL_POWER; pwm_r -= MANUAL_POWER
                 if keys[pygame.K_SPACE]: pwm_l, pwm_r = 0, 0; env.rover.vx = 0
 
-                # --- SAFETY ASSIST ---
+                # Safety Assist
                 if current_mode == MODE_MANUAL:
                     readings = env.sensors.prox.get_data()
                     min_front = np.min(readings[0:3])
                     min_rear = np.min(readings[3:5])
-                    
-                    THRESH_YELLOW = 0.75
-                    THRESH_RED = 0.50
                     THRESH_CRITICAL = 0.30
-                    FACTOR_YELLOW = 0.5 
                     FACTOR_RED = 0.2    
 
                     if pwm_l > 0 or pwm_r > 0:
-                        if min_front < THRESH_CRITICAL:
-                            if pwm_l > 0: pwm_l = 0
-                            if pwm_r > 0: pwm_r = 0
-                        elif min_front < THRESH_RED:
-                            if pwm_l > 0: pwm_l *= FACTOR_RED
-                            if pwm_r > 0: pwm_r *= FACTOR_RED
-                        elif min_front < THRESH_YELLOW:
-                            if pwm_l > 0: pwm_l *= FACTOR_YELLOW
-                            if pwm_r > 0: pwm_r *= FACTOR_YELLOW
+                        if min_front < THRESH_CRITICAL: pwm_l, pwm_r = 0, 0
+                        elif min_front < 0.5: pwm_l *= FACTOR_RED; pwm_r *= FACTOR_RED
 
                     if pwm_l < 0 or pwm_r < 0:
-                        if min_rear < THRESH_CRITICAL:
-                            if pwm_l < 0: pwm_l = 0
-                            if pwm_r < 0: pwm_r = 0
-                        elif min_rear < THRESH_RED:
-                            if pwm_l < 0: pwm_l *= FACTOR_RED
-                            if pwm_r < 0: pwm_r *= FACTOR_RED
-                        elif min_rear < THRESH_YELLOW:
-                            if pwm_l < 0: pwm_l *= FACTOR_YELLOW
-                            if pwm_r < 0: pwm_r *= FACTOR_YELLOW
-            
-            action = [pwm_l, pwm_r]
-            obs, reward, done, info = env.step(action)
-            
+                        if min_rear < THRESH_CRITICAL: pwm_l, pwm_r = 0, 0
+                        elif min_rear < 0.5: pwm_l *= FACTOR_RED; pwm_r *= FACTOR_RED
+                
+                # Normalize
+                action_l = max(-1.0, min(1.0, pwm_l / 255.0))
+                action_r = max(-1.0, min(1.0, pwm_r / 255.0))
+                
+                obs, reward, terminated, truncated, info = env.step([action_l, action_r])
+
+            # Check collisions/Success
+            done = terminated or truncated
             if env.collided:
                 if current_mode == MODE_RTH: reset_sim()
                 else: reset_sim()
@@ -245,19 +276,23 @@ def main():
         for y in range(0, VIEWPORT_HEIGHT, 50): pygame.draw.line(screen, COLOR_GRID, (0, y), (VIEWPORT_WIDTH, y))
         
         pygame.draw.rect(screen, COLOR_WALL, (0,0, VIEWPORT_WIDTH, VIEWPORT_HEIGHT), 10)
-        for obs in env.obstacles: pygame.draw.rect(screen, COLOR_OBSTACLE, obs)
+        for obs_rect in env.obstacles: pygame.draw.rect(screen, COLOR_OBSTACLE, obs_rect)
         env.dock.draw(screen)
         env.rover.draw(screen)
-        draw_park_pilot(screen, env.rover, env.sensors.prox, show_sensors)
         
-        if show_sensors:
-            rx, ry = env.rover.x, env.rover.y
+        # --- GLOBAL PHYSICS SAFETY CHECK ---
+        # If the rover has teleported to Infinity/NaN, skip ALL sensor drawing
+        rx, ry = env.rover.x, env.rover.y
+        is_rover_valid = math.isfinite(rx) and math.isfinite(ry)
+
+        if is_rover_valid:
+            draw_park_pilot(screen, env.rover, env.sensors.prox, show_sensors)
+        
+        if show_sensors and is_rover_valid:
             emit_pos = env.dock.emit_pos
             face_ang = env.dock.facing_angle
             s = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
             
-            # --- CONE VISUALIZATION (Front ILS) ---
-            # Using new WIDE cone constants
             r_start = math.radians(face_ang - IR_CONE_OUTER)
             r_end = math.radians(face_ang + IR_CONE_INNER)
             draw_blocked_beam(s, emit_pos, r_start, r_end, (255, 0, 0, 30), env.obstacles)
@@ -268,41 +303,43 @@ def main():
             
             screen.blit(s, (0,0))
             
+            # --- THE FIXED LINE ---
+            # This line caused the crash. Now protected by 'is_rover_valid'.
             pygame.draw.line(screen, (0, 255, 255, 80), (rx, ry), env.dock.emit_pos, 2)
             
-            # Draw LIDAR
             lidar_data = env.sensors.lidar.get_data()
             for i, dist_norm in enumerate(lidar_data):
                 dist_px = dist_norm * LIDAR_MAX_RANGE_PX
                 angle = math.radians(env.rover.angle + env.sensors.lidar.ray_angles[i])
                 ex = rx + math.cos(angle) * dist_px; ey = ry + math.sin(angle) * dist_px
                 color = (int(255*(1.0-dist_norm)), 50, 50) if dist_norm < 1.0 else (30, 30, 30)
-                pygame.draw.line(screen, color, (rx, ry), (ex, ey), 1)
+                
+                # Extra check for Lidar endpoints
+                if math.isfinite(ex) and math.isfinite(ey):
+                    pygame.draw.line(screen, color, (rx, ry), (ex, ey), 1)
 
-            # Draw Front IR Hits
             ir_data = env.sensors.ir.get_data()
             if ir_data[0] > 0 or ir_data[1] > 0:
                 f_angle = math.radians(env.rover.angle)
                 fx = rx + math.cos(f_angle) * IR_MAX_RANGE_PX
                 fy = ry + math.sin(f_angle) * IR_MAX_RANGE_PX
                 col = (0,255,255) if (ir_data[0] > 0 and ir_data[1] > 0) else (255,0,0) if ir_data[0]>0 else (0,255,0)
-                pygame.draw.line(screen, col, (rx, ry), (fx, fy), 2)
+                if math.isfinite(fx) and math.isfinite(fy):
+                    pygame.draw.line(screen, col, (rx, ry), (fx, fy), 2)
 
-            # Draw "Ready to Turn"
             if ir_data[5] > 0:
                 pygame.draw.circle(screen, (255, 0, 255), (int(rx), int(ry)), ROVER_RADIUS + 10, 2)
 
-            # --- Draw Rear Docking Sensors ---
-            # Lasers (Cyan)
             l_ray, r_ray = env.sensors.rear.get_visualization_data()
-            pygame.draw.line(screen, (0, 255, 255), l_ray[0], l_ray[1], 2)
-            pygame.draw.line(screen, (0, 255, 255), r_ray[0], r_ray[1], 2)
+            if np.isfinite(l_ray).all():
+                pygame.draw.line(screen, (0, 255, 255), l_ray[0], l_ray[1], 2)
+            if np.isfinite(r_ray).all():
+                pygame.draw.line(screen, (0, 255, 255), r_ray[0], r_ray[1], 2)
             
-            # Rear IR Indicators (Dots)
             rear_data = env.sensors.rear.get_data()
-            if rear_data[2] > 0.5: # Left Active
+            if rear_data[2] > 0.5: 
                 pygame.draw.circle(screen, (0, 255, 0), (int(rx - 10), int(ry)), 4)
-            if rear_data[3] > 0.5: # Right Active
+            if rear_data[3] > 0.5: 
                 pygame.draw.circle(screen, (0, 255, 0), (int(rx + 10), int(ry)), 4)
 
         hud.draw(screen, env, current_mode, ai_train_active)
