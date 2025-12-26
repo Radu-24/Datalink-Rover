@@ -8,7 +8,7 @@ VIEWPORT_HEIGHT = 700
 UI_PANEL_WIDTH = SCREEN_WIDTH - VIEWPORT_WIDTH
 
 FPS = 60
-TITLE = "DataLink Rover Sim - v13.0 (Pure Analog Guidance)"
+TITLE = "DataLink Rover Sim - v14.0 (Real-Life Sensor Fusion)"
 
 # --- Colors ---
 COLOR_BG = (10, 12, 16)
@@ -61,14 +61,23 @@ PP_ANGLES_REAR = [(150, 170), (190, 210)]
 UWB_MAX_RANGE_PX = 700   
 UWB_NOISE_STD_PX = 15.0  
 
-# --- IR ---
+# --- FRONT IR (Approach / ILS) ---
 IR_MAX_RANGE_PX = 500     
 IR_FRONT_CONE = 45        
 IR_TURN_DIST = 100        
 IR_TURN_TOLERANCE = 15    
-IR_REAR_CONE = 60         
-IR_SENSOR_SPACING = 14    
-DOCK_EMIT_CONE = 45       
+IR_CONE_INNER = 5   
+IR_CONE_OUTER = 60  
+
+# --- REAR DOCKING SYSTEM (Real Life Fusion) ---
+# 1. Rear IR (For Centering)
+REAR_IR_SPACING = 30    # Pixels between Left and Right IR sensors
+REAR_IR_FOV = 60        # Field of View for rear IR receivers
+
+# 2. Rear Lasers (For Straightness)
+TOF_MAX_RANGE_PX = 200
+TOF_SPACING = 34        # Pixels between Left and Right Lasers
+TOF_NOISE_STD_PX = 1.0
 
 # --- Difficulty Settings ---
 DIFF_EASY = { "name": "EASY", "obs": 2, "complex": 0.0, "clutter": 0.0, "dist": 24, "angle": 40 }

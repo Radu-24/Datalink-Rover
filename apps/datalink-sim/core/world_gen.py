@@ -131,7 +131,8 @@ def generate_world(spawn_on_dock=False, difficulty=DIFF_MEDIUM):
                 
                 dist_to_dock = math.hypot(rx - dock_front_pos[0], ry - dock_front_pos[1])
                 
-                if r_rect.collidelist(all_blockers) == -1 and dist_to_dock > 300 and not in_safe_zone:
+                # FIXED: Reduced distance check from 300 to 200 to allow spawning in Hard mode
+                if r_rect.collidelist(all_blockers) == -1 and dist_to_dock > 200 and not in_safe_zone:
                     start_pos = (rx, ry)
                     start_angle = random.randint(0, 360)
                     found = True

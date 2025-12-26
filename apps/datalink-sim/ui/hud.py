@@ -8,11 +8,16 @@ class HUD:
         self.font_md = pygame.font.SysFont("Consolas", 14, bold=True)
         self.font_lg = pygame.font.SysFont("Arial", 20, bold=True)
         
-    def _draw_bar(self, surf, x, y, w, h, pct, color):
-        pygame.draw.rect(surf, (40, 44, 50), (x, y, w, h))
-        fill_w = int(w * max(0, min(1, pct)))
-        pygame.draw.rect(surf, color, (x, y, fill_w, h))
-        pygame.draw.rect(surf, COLOR_UI_BORDER, (x, y, w, h), 1)
+        # --- SMOOTHING VARIABLES ---
+        self.smooth_center = 0.0
+        self.smooth_angle = 0.0
+        
+        # Memory variables
+        self.last_center_status = "OFF"
+        self.last_angle_status = "OFF"
+        self.last_valid_center = 0.0
+        self.last_valid_angle = 0.0
+        self.last_active_time = 0
 
     def draw_status_panel(self, surface, flags):
         x, y = 20, 20
@@ -82,7 +87,6 @@ class HUD:
 
         # --- ILS DISPLAY ---
         ir_data = env.sensors.ir.get_data()
-        
         pygame.draw.rect(surface, (20, 20, 20), (x_pad, y, 160, 30), border_radius=4)
         r_col = (255, 50, 50) if ir_data[0] > 0 else (50, 20, 20)
         pygame.draw.rect(surface, r_col, (x_pad + 10, y + 5, 20, 20), border_radius=10)
@@ -108,47 +112,105 @@ class HUD:
         surface.blit(txt, rect)
         y += 40
         
-        # --- REAR LOCK ---
-        active = ir_data[2] > 0 # Active flag
-        error = ir_data[4]
+        # --- DOCKING GUIDANCE (Rear) ---
+        rear_data = env.sensors.rear.get_data()
+        ir_left, ir_right = rear_data[2], rear_data[3]
+        las_left, las_right = rear_data[0], rear_data[1]
         
-        bar_w = 160
-        bar_center = x_pad + bar_w // 2
-        pygame.draw.rect(surface, (40, 44, 50), (x_pad, y, bar_w, 20))
-        pygame.draw.line(surface, (100, 100, 100), (bar_center, y), (bar_center, y+20), 2)
+        is_active = (ir_left > 0 or ir_right > 0 or las_left > 0 or las_right > 0)
         
-        status = "REAR INACTIVE"
-        col = (50, 50, 50)
+        target_center = self.smooth_center 
+        target_angle = self.smooth_angle   
         
-        if active:
-            clamped_error = max(-1.0, min(1.0, error))
-            cursor_x = bar_center + (clamped_error * (bar_w/2 - 5))
+        center_status = "OFF"
+        angle_status = "OFF"
+        center_col = (80, 80, 80)
+        angle_col = (80, 80, 80)
+        
+        if is_active:
+            self.last_active_time = pygame.time.get_ticks()
             
-            # Draw circles at edges
-            pygame.draw.circle(surface, (50, 255, 50), (x_pad - 10, y + 10), 5)
-            pygame.draw.circle(surface, (50, 255, 50), (x_pad + bar_w + 10, y + 10), 5)
-
-            if abs(error) < 0.1: # 5px
-                status = "CENTERED"
-                cursor_col = (50, 255, 50)
-                col = (50, 255, 50)
-            elif error < -0.9:
-                status = "TOO LEFT"
-                cursor_col = (255, 50, 50)
-                col = (255, 100, 100)
-            elif error > 0.9:
-                status = "TOO RIGHT"
-                cursor_col = (255, 50, 50)
-                col = (255, 100, 100)
+            # --- 1. CENTER LOGIC ---
+            diff = ir_left - ir_right
+            # Use a threshold so tiny jitter doesn't flash the text
+            if abs(diff) < 0.15: 
+                center_status = "LOCKED"
+                center_col = (50, 255, 50)
+                target_center = 0.0
+            elif diff > 0:
+                center_status = "TOO LEFT"
+                center_col = (255, 200, 0)
+                target_center = -1.0 * (diff * 2.0)
             else:
-                status = "ALIGNING..."
-                cursor_col = (255, 200, 0)
-                col = (255, 200, 0)
+                center_status = "TOO RIGHT"
+                center_col = (255, 200, 0)
+                target_center = -1.0 * (diff * 2.0)
 
-            pygame.draw.rect(surface, cursor_col, (cursor_x - 5, y, 10, 20))
+            # --- 2. ANGLE LOGIC ---
+            raw_angle = (las_left - las_right) * 6.0 # Lower multiplier to reduce jitter
+            target_angle = raw_angle
             
-        lbl = self.font_sm.render(status, True, col)
-        surface.blit(lbl, (x_pad + 40, y - 15))
+            if abs(target_angle) < 0.2:
+                angle_status = "STRAIGHT"
+                angle_col = (50, 255, 50)
+            else:
+                angle_status = "ANGLED"
+                angle_col = (255, 50, 50)
+                
+            self.last_center_status = center_status
+            self.last_angle_status = angle_status
+            self.last_valid_center = target_center
+            self.last_valid_angle = target_angle
+            
+        else:
+            if pygame.time.get_ticks() - self.last_active_time < 1000:
+                center_status = self.last_center_status
+                angle_status = self.last_angle_status
+                center_col = (100, 100, 100)
+                angle_col = (100, 100, 100)
+                target_center = self.last_valid_center
+                target_angle = self.last_valid_angle
+            else:
+                center_status = "OFF"
+                angle_status = "OFF"
+                target_center = 0.0
+                target_angle = 0.0
+
+        # --- HEAVY SMOOTHING (0.05 factor) ---
+        self.smooth_center += (target_center - self.smooth_center) * 0.05
+        self.smooth_angle += (target_angle - self.smooth_angle) * 0.05
+
+        y += 10
+        lbl = self.font_sm.render("REAR GUIDANCE", True, COLOR_TEXT_DIM)
+        surface.blit(lbl, (x_pad, y))
+        y += 20
+        
+        def draw_guidance_bar(label, val, status_txt, color, active):
+            bar_w = 160
+            bar_center = x_pad + bar_w // 2
+            
+            bg_col = (40, 44, 50) 
+            pygame.draw.rect(surface, bg_col, (x_pad, y, bar_w, 15))
+            pygame.draw.line(surface, (100, 100, 100), (bar_center, y), (bar_center, y+15), 1)
+            
+            clamped = max(-1.0, min(1.0, val))
+            cursor_x = bar_center + (clamped * (bar_w/2 - 5))
+            
+            if color != (80, 80, 80): 
+                pygame.draw.rect(surface, color, (cursor_x - 3, y, 6, 15))
+            
+            lbl_surf = self.font_sm.render(label, True, (180, 180, 180))
+            stat_surf = self.font_sm.render(status_txt, True, color)
+            
+            surface.blit(lbl_surf, (x_pad, y - 12))
+            # Fixed text position to align right
+            txt_w = stat_surf.get_width()
+            surface.blit(stat_surf, (x_pad + bar_w - txt_w, y - 12))
+
+        draw_guidance_bar("CENTER", self.smooth_center, center_status, center_col, is_active)
+        y += 35
+        draw_guidance_bar("ANGLE", self.smooth_angle, angle_status, angle_col, is_active)
+        y += 30
 
         # Warning
         prox_data = env.sensors.prox.get_data()

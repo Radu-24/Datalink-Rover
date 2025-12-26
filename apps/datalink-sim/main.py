@@ -85,8 +85,6 @@ def main():
             # LOCKDOWN: Force RTH, Close Menus
             current_mode = MODE_RTH
             current_state = STATE_RUNNING # Force close menu if open
-        # When turning OFF, we stay in RTH but regain manual control
-        # User can switch mode manually if they want
 
     def reset_sim():
         nonlocal has_left_dock
@@ -139,22 +137,16 @@ def main():
     ]
 
     while True:
-        action = [0, 0]
         events = pygame.event.get()
         
         for event in events:
             if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
             
-            # --- GLOBAL KEYBINDS ---
-            # Reset works everywhere unless keys locked? Let's keep reset available manually too.
             if event.type == pygame.KEYDOWN and event.key == pygame.K_r: reset_sim()
 
             if current_state == STATE_RUNNING:
-                # The AI Button always works
                 btn_ai.handle_event(event)
-                
-                # These buttons ONLY work if AI Train is NOT active
                 if not ai_train_active:
                     btn_diff.handle_event(event)
                     btn_settings.handle_event(event)
@@ -174,8 +166,10 @@ def main():
             pwm_l, pwm_r = 0, 0
             PWM_POWER = 220 
             
-            ir_data = env.sensors.ir.get_data()
-            is_docking_mode = (ir_data[2] > 0 or ir_data[3] > 0)
+            # Check for docking mode to slow down
+            rear_data = env.sensors.rear.get_data()
+            # If any rear sensor is picking up signal, slow down
+            is_docking_mode = (rear_data[2] > 0.1 or rear_data[3] > 0.1)
             turn_power = PWM_POWER
             if is_docking_mode: turn_power *= 0.3 
 
@@ -183,26 +177,19 @@ def main():
             #           CONTROL LOGIC BLOCK
             # ==========================================
             
-            # --- CASE 1: AI TRAIN ACTIVE (Total Lockdown) ---
             if ai_train_active:
-                # User Input Ignored. Buttons Locked.
-                # Only AI drives.
-                # pwm_l, pwm_r = ai_model.predict(obs)
+                # LOCKED
                 pwm_l, pwm_r = 0, 0 
                 
-            # --- CASE 2: HUMAN CONTROL (Manual, Path, or Manual-RTH) ---
             else:
-                # Human Drives (WASD)
+                # MANUAL
                 if keys[pygame.K_w]: pwm_l += PWM_POWER; pwm_r += PWM_POWER
                 if keys[pygame.K_s]: pwm_l -= PWM_POWER; pwm_r -= PWM_POWER
                 if keys[pygame.K_a]: pwm_l -= turn_power; pwm_r += turn_power
                 if keys[pygame.K_d]: pwm_l += turn_power; pwm_r -= turn_power
                 if keys[pygame.K_SPACE]: pwm_l, pwm_r = 0, 0; env.rover.vx = 0
 
-                # --- SAFETY ASSIST CHECK ---
-                # Safety is ON for Manual Mode ONLY.
-                # Safety is OFF for Pathfinding and RTH (Manual or AI).
-                
+                # --- SAFETY ASSIST ---
                 if current_mode == MODE_MANUAL:
                     readings = env.sensors.prox.get_data()
                     min_front = np.min(readings[0:3])
@@ -214,7 +201,6 @@ def main():
                     FACTOR_YELLOW = 0.5 
                     FACTOR_RED = 0.2    
 
-                    # Forward Safety
                     if pwm_l > 0 or pwm_r > 0:
                         if min_front < THRESH_CRITICAL:
                             if pwm_l > 0: pwm_l = 0
@@ -226,7 +212,6 @@ def main():
                             if pwm_l > 0: pwm_l *= FACTOR_YELLOW
                             if pwm_r > 0: pwm_r *= FACTOR_YELLOW
 
-                    # Reverse Safety
                     if pwm_l < 0 or pwm_r < 0:
                         if min_rear < THRESH_CRITICAL:
                             if pwm_l < 0: pwm_l = 0
@@ -238,25 +223,18 @@ def main():
                             if pwm_l < 0: pwm_l *= FACTOR_YELLOW
                             if pwm_r < 0: pwm_r *= FACTOR_YELLOW
             
-            # --- STEP ---
             action = [pwm_l, pwm_r]
             obs, reward, done, info = env.step(action)
             
-            # --- COLLISION LOGIC ---
             if env.collided:
-                # If in RTH (AI or Manual), instant restart
-                if current_mode == MODE_RTH:
-                    reset_sim()
-                # If Manual/Path, we might allow it to sit there (or instant reset too, sticking to previous request)
-                else:
-                    reset_sim()
+                if current_mode == MODE_RTH: reset_sim()
+                else: reset_sim()
             
-            # --- SUCCESS LOGIC ---
             if not env.success: has_left_dock = True
             
             if env.success and has_left_dock:
                 dock_timer += 1
-                if dock_timer > FPS * 1: # 1 Second Wait
+                if dock_timer > FPS * 1: 
                     reset_sim()
                     dock_timer = 0
             else: dock_timer = 0
@@ -278,14 +256,21 @@ def main():
             face_ang = env.dock.facing_angle
             s = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
             
-            r_start = math.radians(face_ang - 30); r_end = math.radians(face_ang + 5)
+            # --- CONE VISUALIZATION (Front ILS) ---
+            # Using new WIDE cone constants
+            r_start = math.radians(face_ang - IR_CONE_OUTER)
+            r_end = math.radians(face_ang + IR_CONE_INNER)
             draw_blocked_beam(s, emit_pos, r_start, r_end, (255, 0, 0, 30), env.obstacles)
-            g_start = math.radians(face_ang - 5); g_end = math.radians(face_ang + 30)
+            
+            g_start = math.radians(face_ang - IR_CONE_INNER)
+            g_end = math.radians(face_ang + IR_CONE_OUTER)
             draw_blocked_beam(s, emit_pos, g_start, g_end, (0, 255, 0, 30), env.obstacles)
+            
             screen.blit(s, (0,0))
             
             pygame.draw.line(screen, (0, 255, 255, 80), (rx, ry), env.dock.emit_pos, 2)
             
+            # Draw LIDAR
             lidar_data = env.sensors.lidar.get_data()
             for i, dist_norm in enumerate(lidar_data):
                 dist_px = dist_norm * LIDAR_MAX_RANGE_PX
@@ -294,6 +279,7 @@ def main():
                 color = (int(255*(1.0-dist_norm)), 50, 50) if dist_norm < 1.0 else (30, 30, 30)
                 pygame.draw.line(screen, color, (rx, ry), (ex, ey), 1)
 
+            # Draw Front IR Hits
             ir_data = env.sensors.ir.get_data()
             if ir_data[0] > 0 or ir_data[1] > 0:
                 f_angle = math.radians(env.rover.angle)
@@ -302,10 +288,24 @@ def main():
                 col = (0,255,255) if (ir_data[0] > 0 and ir_data[1] > 0) else (255,0,0) if ir_data[0]>0 else (0,255,0)
                 pygame.draw.line(screen, col, (rx, ry), (fx, fy), 2)
 
+            # Draw "Ready to Turn"
             if ir_data[5] > 0:
                 pygame.draw.circle(screen, (255, 0, 255), (int(rx), int(ry)), ROVER_RADIUS + 10, 2)
 
-        hud.draw(screen, env, current_mode, ai_train_active) # Pass AI State to HUD
+            # --- Draw Rear Docking Sensors ---
+            # Lasers (Cyan)
+            l_ray, r_ray = env.sensors.rear.get_visualization_data()
+            pygame.draw.line(screen, (0, 255, 255), l_ray[0], l_ray[1], 2)
+            pygame.draw.line(screen, (0, 255, 255), r_ray[0], r_ray[1], 2)
+            
+            # Rear IR Indicators (Dots)
+            rear_data = env.sensors.rear.get_data()
+            if rear_data[2] > 0.5: # Left Active
+                pygame.draw.circle(screen, (0, 255, 0), (int(rx - 10), int(ry)), 4)
+            if rear_data[3] > 0.5: # Right Active
+                pygame.draw.circle(screen, (0, 255, 0), (int(rx + 10), int(ry)), 4)
+
+        hud.draw(screen, env, current_mode, ai_train_active)
         
         diff_txt = hud.font_sm.render(f"DIFF: {env.current_difficulty['name']}", True, (255, 200, 50))
         screen.blit(diff_txt, (VIEWPORT_WIDTH + 20, SCREEN_HEIGHT - 250))
@@ -313,13 +313,10 @@ def main():
         flags = [current_mode == MODE_MANUAL, current_mode == MODE_PATH, current_mode == MODE_RTH]
         hud.draw_status_panel(screen, flags)
         
-        # --- UPDATE BUTTON VISUALS ---
         if ai_train_active:
             btn_ai.text = "AI TRAIN: ON"
             btn_ai.bg_color = (40, 200, 40)
             btn_ai.hover_color = (60, 220, 60)
-            
-            # Dim Locked Buttons
             btn_diff.bg_color = (40, 40, 40); btn_diff.text_color = (100, 100, 100)
             btn_settings.bg_color = (40, 40, 40); btn_settings.text_color = (100, 100, 100)
             btn_toggle_view.bg_color = (40, 40, 40); btn_toggle_view.text_color = (100, 100, 100)
@@ -327,8 +324,6 @@ def main():
             btn_ai.text = "AI TRAIN: OFF"
             btn_ai.bg_color = (200, 40, 40)
             btn_ai.hover_color = (220, 60, 60)
-            
-            # Restore Normal Buttons
             btn_diff.bg_color = COLOR_BTN_IDLE; btn_diff.text_color = COLOR_TEXT
             btn_settings.bg_color = COLOR_BTN_IDLE; btn_settings.text_color = COLOR_TEXT
             btn_toggle_view.bg_color = COLOR_BTN_IDLE; btn_toggle_view.text_color = COLOR_TEXT
